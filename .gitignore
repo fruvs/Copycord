@@ -1,0 +1,4 @@
+/data
+/backup
+.env
+compose.yml
