@@ -1332,6 +1332,15 @@ class ServerReceiver:
                 **base,
                 "embeds": [e.to_dict() for e in all_embeds]
             }
+            
+        payload = {
+            **base,
+            "content": text or None
+        }
+        if embeds:
+            # convert all Embed instances to dicts
+            payload["embeds"] = [e.to_dict() for e in embeds]
+        return payload
 
     async def forward_message(self, msg: Dict):
         source_id = msg["channel_id"]
@@ -1358,9 +1367,19 @@ class ServerReceiver:
             if not url:
                 return
 
-        # build the payload
         payload = self._build_webhook_payload(msg)
-        # sanity‐check serializability
+        
+        logging.info(f"Message payload: {payload}")
+
+        # if our builder ever returns None, skip safely
+        if payload is None:
+            logger.info("No webhook payload built for source %d; skipping", source_id)
+            return
+
+        if not payload.get("content") and not payload.get("embeds"):
+            logger.info("Skipping empty message for source %d", source_id)
+            return
+        
         try:
             import json
             json.dumps(payload)
