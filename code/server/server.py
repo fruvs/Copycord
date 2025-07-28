@@ -1326,15 +1326,12 @@ class ServerReceiver:
         if len(text) > 2000:
             logger.debug("Payload too long (%d chars), wrapping in embed", len(text))
             long_embed = Embed(description=text[:4096])
-            embeds.insert(0, long_embed)
-            return {**base, "embeds": embeds}
-
-        payload = {**base, "content": text}
-        if embeds:
-            payload["embeds"] = [
-                e.to_dict() if isinstance(e, Embed) else e for e in embeds
-            ]
-        return payload
+            # turn *all* embeds into dicts
+            all_embeds = [long_embed] + embeds
+            return {
+                **base,
+                "embeds": [e.to_dict() for e in all_embeds]
+            }
 
     async def forward_message(self, msg: Dict):
         source_id = msg["channel_id"]
@@ -1361,7 +1358,18 @@ class ServerReceiver:
             if not url:
                 return
 
+        # build the payload
         payload = self._build_webhook_payload(msg)
+        # sanity‐check serializability
+        try:
+            import json
+            json.dumps(payload)
+        except (TypeError, ValueError) as e:
+            logger.error(
+                "Skipping message %s: payload not JSON serializable: %s; payload=%r",
+                source_id, e, payload
+            )
+            return
 
         if not payload.get("content") and not payload.get("embeds"):
             logger.info("Skipping empty message for source %d", source_id)
