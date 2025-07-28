@@ -8,11 +8,12 @@ _Love this project? Give it a ⭐️ and let others know!_
 
 > [!IMPORTANT]
 > **Features:**
-> - Instantly clones host server categories and channels on first run
+> - Clones host server categories and channels on first run
 > - Detects channel renames, position changes, and recreates missing channels on the fly
 > - Creates webhooks in all channels used to forward identical messages as they are sent
-> - The user account in the host server handles listening; a separate bot handles relaying, minimizing exposure.
-> - Supports community server features
+> - The user account in the host server handles listening; a separate bot handles relaying, minimizing exposure
+> - Slash commands and community server features
+> - Updated regularly with new feature requests
 
 
 ## How It Works
