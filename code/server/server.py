@@ -7,6 +7,7 @@ import discord
 from discord import NotFound, Webhook, ChannelType, Embed
 from discord.errors import HTTPException
 import os
+import sys
 from datetime import datetime, timezone
 from asyncio import Queue
 from common.config import Config
@@ -68,11 +69,26 @@ class ServerReceiver:
         self.bot.load_extension("commands.commands")
         self._ws_task: asyncio.Task | None = None
         self._sitemap_task: asyncio.Task | None = None
+        
+        if not self.config.SERVER_TOKEN:
+            logger.error("No SERVER_TOKEN provided in environment; cannot start.")
+            sys.exit(1)
 
 
     async def on_ready(self):
         self.session = aiohttp.ClientSession()
         logger.info("Logged in as %s", self.bot.user)
+        
+        #Ensure we're in the clone guild
+        clone_guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+        if clone_guild is None:
+            logger.error(
+                "Bot (ID %s) is not a member of the clone guild %s; shutting down.",
+                self.bot.user.id,
+                self.config.CLONE_GUILD_ID,
+            )
+            await self.bot.close()
+            return
 
         if not self._processor_started:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
