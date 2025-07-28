@@ -29,7 +29,7 @@ class Config:
             "WS_CLIENT_URL",
             f"ws://{self.CLIENT_WS_HOST}:{self.CLIENT_WS_PORT}"
         )
-        self.SITEMAP_INTERVAL_SECONDS = int(
-            os.getenv("SITEMAP_INTERVAL_SECONDS", "3600")
+        self.SYNC_INTERVAL_SECONDS = int(
+            os.getenv("SYNC_INTERVAL_SECONDS", "3600")
         )
 

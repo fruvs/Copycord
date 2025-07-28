@@ -53,7 +53,7 @@ class ClientListener:
         self.blocked_keywords = self.db.get_blocked_keywords()
         self.start_time = datetime.now(timezone.utc)
         self.bot = commands.Bot(command_prefix="!", self_bot=True)
-        self._sitemap_task: Optional[asyncio.Task] = None
+        self._sync_task: Optional[asyncio.Task] = None
         self.debounce_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
         self.bot.event(self.on_ready)
@@ -173,17 +173,17 @@ class ClientListener:
 
         await self.ws.send({"type": "sitemap", "data": sitemap})
 
-        logger.info("Server Sync sent to Server.")
+        logger.info("Sitemap sent to Server.")
 
-    async def periodic_sitemap_loop(self):
+    async def periodic_sync_loop(self):
         await self.bot.wait_until_ready()
         await asyncio.sleep(5)
         while True:
             try:
                 await self.build_and_send_sitemap()
             except Exception:
-                logger.exception("Error in periodic sitemap loop")
-            await asyncio.sleep(self.config.SITEMAP_INTERVAL_SECONDS)
+                logger.exception("Error in periodic sync loop")
+            await asyncio.sleep(self.config.SYNC_INTERVAL_SECONDS)
 
 
     async def _debounced_sitemap(self):
@@ -193,14 +193,14 @@ class ClientListener:
         finally:
             self.debounce_task = None
 
-    def schedule_sitemap(self):
+    def schedule_sync(self):
         if self.debounce_task is None:
             self.debounce_task = asyncio.create_task(self._debounced_sitemap())
 
     async def on_ready(self):
         logger.info("Logged in as %s", self.bot.user)
-        if self._sitemap_task is None:
-            self._sitemap_task = asyncio.create_task(self.periodic_sitemap_loop())
+        if self._sync_task is None:
+            self._sync_task = asyncio.create_task(self.periodic_sync_loop())
         if self._ws_task is None:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
 
@@ -296,26 +296,26 @@ class ClientListener:
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
         if channel.guild.id != self.config.HOST_GUILD_ID:
             return
-        self.schedule_sitemap()
+        self.schedule_sync()
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         if channel.guild.id != self.config.HOST_GUILD_ID:
             return
-        self.schedule_sitemap()
+        self.schedule_sync()
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
     ):
         if before.guild.id != self.config.HOST_GUILD_ID:
             return
-        self.schedule_sitemap()
+        self.schedule_sync()
         
     async def _shutdown(self):
         logger.info("Shutting down client…")
-        if self._sitemap_task:
-            self._sitemap_task.cancel()
+        if self._sync_task:
+            self._sync_task.cancel()
             try:
-                await self._sitemap_task
+                await self._sync_task
             except asyncio.CancelledError:
                 pass
 
