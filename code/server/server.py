@@ -187,7 +187,7 @@ class ServerReceiver:
         supports_comm = "COMMUNITY" in guild.features
         if want_comm and not supports_comm:
             logger.warning(
-                "Guild %s doesn’t support Community; Please enable it manually in the guild settings.",
+                "Guild %s doesn’t support Community, some features will be disabled; Please enable it manually in the guild settings.",
                 guild.name
             )
             want_comm = False
