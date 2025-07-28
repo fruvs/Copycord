@@ -50,6 +50,7 @@ class ClientListener:
     def __init__(self):
         self.config = Config()
         self.db = DBManager(self.config.DB_PATH)
+        self.host_guild_id= int(self.config.HOST_GUILD_ID)
         self.blocked_keywords = self.db.get_blocked_keywords()
         self.start_time = datetime.now(timezone.utc)
         self.bot = commands.Bot(command_prefix="!", self_bot=True)
@@ -69,10 +70,6 @@ class ClientListener:
             listen_port=self.config.CLIENT_WS_PORT,
         )
         
-        if not self.config.CLIENT_TOKEN:
-            logger.error("No CLIENT_TOKEN provided in environment; cannot start.")
-            sys.exit(1)
-
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(
@@ -114,9 +111,9 @@ class ClientListener:
         return None
 
     async def build_and_send_sitemap(self):
-        guild = self.bot.get_guild(self.config.HOST_GUILD_ID)
+        guild = self.bot.get_guild(self.host_guild_id)
         if not guild:
-            logger.error("Guild %s not found", self.config.HOST_GUILD_ID)
+            logger.error("Guild %s not found", self.host_guild_id)
             return
 
         sitemap = {
@@ -198,7 +195,18 @@ class ClientListener:
             self.debounce_task = asyncio.create_task(self._debounced_sitemap())
 
     async def on_ready(self):
-        logger.info("Logged in as %s", self.bot.user)
+        #Ensure we're in the clone guild
+        host_guild = self.bot.get_guild(self.host_guild_id)
+        if host_guild is None:
+            logger.error(
+                "%s is not a member of the guild %s; shutting down.",
+                self.bot.user,
+                self.host_guild_id,
+            )
+            sys.exit(1)
+
+        logger.info("Logged in as %s in guild %s", self.bot.user, host_guild.name)
+
         if self._sync_task is None:
             self._sync_task = asyncio.create_task(self.periodic_sync_loop())
         if self._ws_task is None:
@@ -209,7 +217,7 @@ class ClientListener:
             return
         if message.author.id == self.bot.user.id:
             return
-        if message.guild and message.guild.id != self.config.HOST_GUILD_ID:
+        if message.guild and message.guild.id != self.host_guild_id:
             return
         if any(kw in message.content.lower() for kw in self.blocked_keywords):
             logger.info(
@@ -272,14 +280,14 @@ class ClientListener:
         )
 
     async def on_thread_delete(self, thread: discord.Thread):
-        if thread.guild.id != self.config.HOST_GUILD_ID:
+        if thread.guild.id != self.host_guild_id:
             return
         payload = {"type": "thread_delete", "data": {"thread_id": thread.id}}
         await self.ws.send(payload)
         logger.info("Notified server of deleted thread %s", thread.id)
 
     async def on_thread_update(self, before: discord.Thread, after: discord.Thread):
-        if before.guild and before.guild.id == self.config.HOST_GUILD_ID:
+        if before.guild and before.guild.id == self.host_guild_id:
             if before.name != after.name:
                 payload = {
                     "type": "thread_rename",
@@ -294,19 +302,19 @@ class ClientListener:
                 await self.ws.send(payload)
 
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
-        if channel.guild.id != self.config.HOST_GUILD_ID:
+        if channel.guild.id != self.host_guild_id:
             return
         self.schedule_sync()
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
-        if channel.guild.id != self.config.HOST_GUILD_ID:
+        if channel.guild.id != self.host_guild_id:
             return
         self.schedule_sync()
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
     ):
-        if before.guild.id != self.config.HOST_GUILD_ID:
+        if before.guild.id != self.host_guild_id:
             return
         self.schedule_sync()
         

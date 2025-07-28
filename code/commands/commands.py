@@ -64,7 +64,7 @@ class CloneCommands(commands.Cog):
         if not self.allowed_users:
             logger.warning("No allowed users configured: commands will not work for anyone.")
         else:
-            logger.info(f"Commands enabled for users: {self.allowed_users}")
+            logger.info(f"Commands permissions set for users: {self.allowed_users}")
 
     @commands.slash_command(
         name="ping_server",

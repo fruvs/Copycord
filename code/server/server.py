@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Dict
 import aiohttp
 import discord
 from discord import NotFound, Webhook, ChannelType, Embed
-from discord.errors import HTTPException
+from discord.errors import HTTPException, Forbidden
 import os
 import sys
 from datetime import datetime, timezone
@@ -51,12 +51,13 @@ logger = logging.getLogger("server")
 class ServerReceiver:
     def __init__(self):
         self.config = Config()
-        self.bot = discord.Bot(intents=discord.Intents.all())
+        self.bot = discord.Bot(intents=discord.Intents.all(), sync_commands=False)
         self.ws = WebsocketManager(
             send_url=self.config.CLIENT_WS_URL,
             listen_host=self.config.SERVER_WS_HOST,
             listen_port=self.config.SERVER_WS_PORT,
         )
+        self.clone_guild_id = int(self.config.CLONE_GUILD_ID)
         self.bot.ws_manager = self.ws
         self.db = DBManager(self.config.DB_PATH)
         self.session: aiohttp.ClientSession = None
@@ -66,41 +67,49 @@ class ServerReceiver:
         self._sync_lock = asyncio.Lock()
         self.max_threads = 1000
         self.bot.event(self.on_ready)
-        self.bot.load_extension("commands.commands")
         self._ws_task: asyncio.Task | None = None
         self._sitemap_task: asyncio.Task | None = None
-        
-        if not self.config.SERVER_TOKEN:
-            logger.error("No SERVER_TOKEN provided in environment; cannot start.")
-            sys.exit(1)
+        orig_on_connect = self.bot.on_connect
 
+        async def _command_sync():
+            try:
+                await orig_on_connect()
+            except Forbidden as e:
+                logger.warning(
+                    "Can't sync slash commands, make sure the bot is in the server: %s",
+                    e,
+                )
+
+        self.bot.on_connect = _command_sync
+        self.bot.load_extension("commands.commands")
 
     async def on_ready(self):
         self.session = aiohttp.ClientSession()
-        logger.info("Logged in as %s", self.bot.user)
-        
-        #Ensure we're in the clone guild
-        clone_guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+        # Ensure we're in the clone guild
+        clone_guild = self.bot.get_guild(self.clone_guild_id)
         if clone_guild is None:
             logger.error(
-                "Bot (ID %s) is not a member of the clone guild %s; shutting down.",
+                "Bot (ID %s) is not a member of the guild %s; shutting down.",
                 self.bot.user.id,
-                self.config.CLONE_GUILD_ID,
+                self.clone_guild_id,
             )
             await self.bot.close()
-            return
+            sys.exit(1)
+
+        logger.info(
+            "Logged in as %s and monitoring guild %s ", self.bot.user, clone_guild.name
+        )
 
         if not self._processor_started:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
             self._sitemap_task = asyncio.create_task(self.process_sitemap_queue())
             self._processor_started = True
 
-        
     async def _on_ws(self, msg: dict):
         """
         JSON-decoded msg dict sent by the client.
         """
-        typ  = msg.get("type")
+        typ = msg.get("type")
         data = msg.get("data", {})
         if typ == "sitemap":
             self._sitemap_task_counter += 1
@@ -162,14 +171,27 @@ class ServerReceiver:
         logging.debug(f"Received sitemap {sitemap}")
         async with self._sync_lock:
             self._backoff_delay = 1
-            guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+            guild = self.bot.get_guild(self.clone_guild_id)
             if not guild:
-                logger.error("Clone guild %s not found", self.config.CLONE_GUILD_ID)
+                logger.error("Clone guild %s not found", self.clone_guild_id)
                 return
 
         comm = sitemap.get("community", {})
         rules_id = comm.get("rules_channel_id")
         updates_id = comm.get("public_updates_channel_id")
+        
+        # ─── COMMUNITY SUPPORT CHECK ────────────────────────────────
+        # Does the sitemap ask for community mode?
+        want_comm = bool(comm.get("enabled"))
+        # Does this guild actually support Community features?
+        supports_comm = "COMMUNITY" in guild.features
+        if want_comm and not supports_comm:
+            logger.warning(
+                "Guild %s doesn’t support Community; Please enable it manually in the guild settings.",
+                guild.name
+            )
+            want_comm = False
+
 
         logger.debug(
             "Sync #%d: sitemap has %d categories and %d standalone channels",
@@ -178,16 +200,21 @@ class ServerReceiver:
             len(sitemap.get("standalone_channels", [])),
         )
 
-        if not comm.get("enabled") and "COMMUNITY" in guild.features:
+        if not want_comm and supports_comm:
             try:
                 await guild.edit(community=False)
                 logger.info("Disabled Community mode on clone guild %s", guild.id)
+            except Forbidden as e:
+                logger.warning(
+                    "Cannot disable Community mode on guild %s (missing permission): %s",
+                    guild.id, e
+                )
             except Exception as e:
                 logger.error(
                     "Failed to disable Community on clone guild %s: %s", guild.id, e
                 )
 
-        if comm.get("enabled") and rules_id and updates_id:
+        if want_comm and rules_id and updates_id:
             for orig_chan_id in (rules_id, updates_id):
                 item = next(
                     (
@@ -207,7 +234,7 @@ class ServerReceiver:
                         item["type"],
                     )
 
-        if comm.get("enabled"):
+        if want_comm:
             rules_map = next(
                 (
                     r
@@ -243,20 +270,31 @@ class ServerReceiver:
                     )
 
                     if need_enable or need_update:
-                        await guild.edit(
-                            community=True,
-                            rules_channel=rules_chan,
-                            public_updates_channel=updates_chan,
-                        )
-                        logger.info(
-                            "%s Community mode on clone guild %s, set rules=%s updates=%s",
-                            "Enabled" if need_enable else "Updated",
-                            guild.id,
-                            rules_chan.id,
-                            updates_chan.id,
-                        )
+                        try:
+                            await guild.edit(
+                                community=True,
+                                rules_channel=rules_chan,
+                                public_updates_channel=updates_chan,
+                            )
+                            logger.info(
+                                "%s Community mode on clone guild %s, set rules=%s updates=%s",
+                                "Enabled" if need_enable else "Updated",
+                                guild.id,
+                                rules_chan.id,
+                                updates_chan.id,
+                            )
+                        except Forbidden as e:
+                            logger.warning(
+                                "Cannot enable/update Community mode on guild %s (missing permission): %s",
+                                guild.id, e
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "Failed to enable/update Community mode on clone guild %s: %s",
+                                guild.id, e
+                            )
 
-        if comm.get("enabled") and rules_id and updates_id:
+        if want_comm and rules_id and updates_id:
             for orig_chan_id in (rules_id, updates_id):
                 item = next(
                     (
@@ -412,9 +450,7 @@ class ServerReceiver:
             if not existed:
                 new_url = await self._recreate_webhook(orig_forum_id)
                 if not new_url:
-                    logger.error(
-                        "Failed to create webhook for forum %s", orig_forum_id
-                    )
+                    logger.error("Failed to create webhook for forum %s", orig_forum_id)
 
         incoming = self._parse_sitemap(sitemap)
         created_chan = renamed_chan = 0
@@ -458,9 +494,7 @@ class ServerReceiver:
                 )
                 await self._cooldown()
 
-        moved_master = await self._handle_master_channel_moves(
-            guild, incoming, old_map
-        )
+        moved_master = await self._handle_master_channel_moves(guild, incoming, old_map)
 
         delete_remote = getattr(self.config, "DELETE_CLONED_THREADS", True)
         valid_threads = {rec["id"] for rec in sitemap.get("threads", [])}
@@ -472,7 +506,7 @@ class ServerReceiver:
 
             if orig_id not in valid_threads:
                 if delete_remote:
-                    guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+                    guild = self.bot.get_guild(self.clone_guild_id)
                     if guild:
                         ch = guild.get_channel(clone_id)
                         if not ch:
@@ -515,9 +549,7 @@ class ServerReceiver:
                 continue
 
             clone_tid = mapping["cloned_thread_id"]
-            ch = guild.get_channel(clone_tid) or await self.bot.fetch_channel(
-                clone_tid
-            )
+            ch = guild.get_channel(clone_tid) or await self.bot.fetch_channel(clone_tid)
             if ch and ch.name != new_name:
                 old = ch.name
                 try:
@@ -611,8 +643,8 @@ class ServerReceiver:
                     self.db.upsert_channel_mapping(
                         orig_id,
                         item["name"],
-                        row["cloned_channel_id"],  
-                        row["channel_webhook_url"],  
+                        row["cloned_channel_id"],
+                        row["channel_webhook_url"],
                         parent,
                         clone_parent,
                     )
@@ -621,7 +653,7 @@ class ServerReceiver:
                     orig_id,
                     item["name"],
                     None,
-                    None, 
+                    None,
                     parent,
                     clone_parent,
                 )
@@ -641,7 +673,7 @@ class ServerReceiver:
                         "name": ch["name"],
                         "parent_id": cat["id"],
                         "parent_name": cat["name"],
-                        "type": ch.get("type", 0),  
+                        "type": ch.get("type", 0),
                     }
                 )
         for ch in sitemap.get("standalone_channels", []):
@@ -651,7 +683,7 @@ class ServerReceiver:
                     "name": ch["name"],
                     "parent_id": None,
                     "parent_name": None,
-                    "type": ch.get("type", 0),  
+                    "type": ch.get("type", 0),
                 }
             )
         for forum in sitemap.get("forums", []):
@@ -845,7 +877,7 @@ class ServerReceiver:
 
         await self._cooldown()
 
-        wh = await ch.create_webhook(name="mirror-bot")
+        wh = await ch.create_webhook(name="Clonecord")
         url = f"https://discord.com/api/webhooks/{wh.id}/{wh.token}"
         logger.info("Created webhook for source %d → %s", original_id, url)
 
@@ -935,11 +967,11 @@ class ServerReceiver:
             )
             return None
 
-        guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+        guild = self.bot.get_guild(self.clone_guild_id)
         if not guild:
             logger.error(
                 "Clone guild %s not found; cannot recreate webhook for source %s",
-                self.config.CLONE_GUILD_ID,
+                self.clone_guild_id,
                 original_id,
             )
             return None
@@ -949,7 +981,7 @@ class ServerReceiver:
             logger.error(
                 "Clone channel %s not found in guild %s; cannot recreate webhook for source %s",
                 cloned_id,
-                self.config.CLONE_GUILD_ID,
+                self.clone_guild_id,
                 original_id,
             )
             return None
@@ -980,7 +1012,7 @@ class ServerReceiver:
         Given a forum_map row (from channel_mappings), recreate its webhook,
         update the DB, and return a fresh Webhook object.
         """
-        guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+        guild = self.bot.get_guild(self.clone_guild_id)
         clone_forum = guild.get_channel(forum_map["cloned_channel_id"])
         if clone_forum is None:
             clone_forum = await self.bot.fetch_channel(forum_map["cloned_channel_id"])
@@ -1011,9 +1043,9 @@ class ServerReceiver:
             data["author"],
         )
 
-        guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+        guild = self.bot.get_guild(self.clone_guild_id)
         if not guild:
-            logger.error("Clone guild %s not available", self.config.CLONE_GUILD_ID)
+            logger.error("Clone guild %s not available", self.clone_guild_id)
             return
 
         forum_map = next(
@@ -1153,7 +1185,7 @@ class ServerReceiver:
         cloned_id = row["cloned_thread_id"]
 
         if delete_remote:
-            guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+            guild = self.bot.get_guild(self.clone_guild_id)
             ch = None
             if guild:
                 ch = guild.get_channel(cloned_id)
@@ -1173,7 +1205,9 @@ class ServerReceiver:
                             orig_thread_id,
                         )
                     except Exception as e:
-                        logger.error("Failed to delete cloned thread %s: %s", cloned_id, e)
+                        logger.error(
+                            "Failed to delete cloned thread %s: %s", cloned_id, e
+                        )
             else:
                 logger.warning(
                     "Cloned thread %s not found in guild or via fetch", cloned_id
@@ -1200,7 +1234,7 @@ class ServerReceiver:
             return
 
         cloned_id = row["cloned_thread_id"]
-        guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
+        guild = self.bot.get_guild(self.clone_guild_id)
         if not guild:
             logger.error("Clone guild not available for renames")
             return
@@ -1285,7 +1319,7 @@ class ServerReceiver:
                 embeds.append(raw)
 
         base = {
-            "username":   msg["author"],
+            "username": msg["author"],
             "avatar_url": msg.get("avatar_url"),
         }
 
@@ -1293,11 +1327,13 @@ class ServerReceiver:
             logger.debug("Payload too long (%d chars), wrapping in embed", len(text))
             long_embed = Embed(description=text[:4096])
             embeds.insert(0, long_embed)
-            return { **base, "embeds": embeds }
+            return {**base, "embeds": embeds}
 
-        payload = { **base, "content": text }
+        payload = {**base, "content": text}
         if embeds:
-            payload["embeds"] = [e.to_dict() if isinstance(e, Embed) else e for e in embeds]
+            payload["embeds"] = [
+                e.to_dict() if isinstance(e, Embed) else e for e in embeds
+            ]
         return payload
 
     async def forward_message(self, msg: Dict):
@@ -1352,7 +1388,7 @@ class ServerReceiver:
             except Exception:
                 logger.exception("Error forwarding %d", source_id)
                 return
-            
+
     async def _shutdown(self):
         logger.info("Shutting down server...")
         if self._ws_task is not None:
@@ -1385,9 +1421,8 @@ class ServerReceiver:
             pending = asyncio.all_tasks(loop=loop)
             for task in pending:
                 task.cancel()
-            loop.run_until_complete(
-                asyncio.gather(*pending, return_exceptions=True)
-            )
-        
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+
 if __name__ == "__main__":
     ServerReceiver().run()
