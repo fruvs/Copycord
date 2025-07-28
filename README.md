@@ -116,7 +116,7 @@ Feel free to [open an issue](https://github.com/Copycord/Copycord/issues) if you
 We appreciate all contributions:
 
 1. Fork the repository.  
-2. Create a new branch from `master` with a descriptive name.  
+2. Create a new branch from `main` with a descriptive name.  
 3. Commit your changes and open a [Pull Request](https://github.com/copycord/copycord/pulls), detailing your feature or fix.
 
 Thank you for helping improve Copycord!
