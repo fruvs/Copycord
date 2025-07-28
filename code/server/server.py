@@ -140,7 +140,7 @@ class ServerReceiver:
         delay = self._backoff_delay
         logger.debug(f"Backing off for {delay}s before next action")
         await asyncio.sleep(delay)
-        self._backoff_delay = min(self._backoff_delay * 2, 5)
+        self._backoff_delay = min(self._backoff_delay * 2, 30)
 
     async def sync_structure(self, task_id: int, sitemap: Dict) -> str:
         async with self._sync_lock:
