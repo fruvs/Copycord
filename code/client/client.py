@@ -69,7 +69,7 @@ class ClientListener:
             listen_host=self.config.CLIENT_WS_HOST,
             listen_port=self.config.CLIENT_WS_PORT,
         )
-        
+
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(
@@ -90,7 +90,7 @@ class ClientListener:
                 ", ".join(self.blocked_keywords) or "<none>"
             )
             return None
-        
+
         elif typ == "ping":
             now = datetime.now(timezone.utc)
             now_ts = now.timestamp()
@@ -182,7 +182,6 @@ class ClientListener:
                 logger.exception("Error in periodic sync loop")
             await asyncio.sleep(self.config.SYNC_INTERVAL_SECONDS)
 
-
     async def _debounced_sitemap(self):
         try:
             await asyncio.sleep(1)
@@ -195,7 +194,7 @@ class ClientListener:
             self.debounce_task = asyncio.create_task(self._debounced_sitemap())
 
     async def on_ready(self):
-        #Ensure we're in the clone guild
+        # Ensure we're in the clone guild
         host_guild = self.bot.get_guild(self.host_guild_id)
         if host_guild is None:
             logger.error(
@@ -212,18 +211,33 @@ class ClientListener:
         if self._ws_task is None:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
 
+    def should_ignore(self, message: discord.Message) -> bool:
+        """
+        Skip:
+         - messages from any bot
+         - DMs or messages not in our configured guild
+         - messages in explicitly excluded channels
+         - messages containing a blocked keyword
+        """
+        # ignore DMs or the wrong guild
+        if message.guild is None or message.guild.id != self.host_guild_id:
+            logger.debug("[IGNORED] Dropping message %s:", message.id)
+            return True
+
+        # ignore blocked keywords
+        content = message.content.lower()
+        for kw in self.blocked_keywords:
+            if kw in content:
+                logger.info(
+                    "[BLOCKED] Dropping message %s: contains blocked keyword %r",
+                    message.id, kw
+                )
+                return True
+
+        return False
+
     async def on_message(self, message: discord.Message):
-        if message.type is not discord.MessageType.default:
-            return
-        if message.author.id == self.bot.user.id:
-            return
-        if message.guild and message.guild.id != self.host_guild_id:
-            return
-        if any(kw in message.content.lower() for kw in self.blocked_keywords):
-            logger.info(
-                "[BLOCKED] Dropping message %s: contains blocked keyword",
-                message.id
-            )
+        if self.should_ignore(message):
             return
 
         attachments = [
@@ -317,7 +331,7 @@ class ClientListener:
         if before.guild.id != self.host_guild_id:
             return
         self.schedule_sync()
-        
+
     async def _shutdown(self):
         logger.info("Shutting down client…")
         if self._sync_task:

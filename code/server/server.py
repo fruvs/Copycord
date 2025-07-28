@@ -1369,7 +1369,6 @@ class ServerReceiver:
 
         payload = self._build_webhook_payload(msg)
         
-        logging.info(f"Message payload: {payload}")
 
         # if our builder ever returns None, skip safely
         if payload is None:
