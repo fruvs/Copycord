@@ -143,7 +143,7 @@ class ServerReceiver:
         self._backoff_delay = min(self._backoff_delay * 2, 30)
 
     async def sync_structure(self, task_id: int, sitemap: Dict) -> str:
-        logging.info(f"Received sitemap {sitemap}")
+        logging.debug(f"Received sitemap {sitemap}")
         async with self._sync_lock:
             self._backoff_delay = 1
             guild = self.bot.get_guild(self.config.CLONE_GUILD_ID)
