@@ -112,7 +112,7 @@ This will pull the latest images, start both the **server** (bot) and **client**
 
 ## Contributing & Support
 
-Feel free to [open an issue](https://github.com/Copycord/Copycord/issues) if you hit any road bumps.
+Feel free to [open an issue](https://github.com/Copycord/Copycord/issues) if you hit any road bumps or want to request new features.
 
 We appreciate all contributions:
 
