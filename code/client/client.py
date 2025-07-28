@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 import discord
 import os
+import sys
 from discord.ext import commands
 from common.config import Config
 from common.db import DBManager
@@ -67,6 +68,10 @@ class ClientListener:
             listen_host=self.config.CLIENT_WS_HOST,
             listen_port=self.config.CLIENT_WS_PORT,
         )
+        
+        if not self.config.CLIENT_TOKEN:
+            logger.error("No CLIENT_TOKEN provided in environment; cannot start.")
+            sys.exit(1)
 
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
