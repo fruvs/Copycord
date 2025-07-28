@@ -1281,7 +1281,7 @@ class ServerReceiver:
 
         payload = { **base, "content": text }
         if embeds:
-            payload["embeds"] = embeds
+            payload["embeds"] = [e.to_dict() if isinstance(e, Embed) else e for e in embeds]
         return payload
 
     async def forward_message(self, msg: Dict):
