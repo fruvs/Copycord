@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 import logging
 from typing import Optional
 import discord
+from discord import MessageType
 import os
+import pprint
 import sys
 from discord.ext import commands
 from common.config import Config
@@ -210,21 +212,41 @@ class ClientListener:
             self._sync_task = asyncio.create_task(self.periodic_sync_loop())
         if self._ws_task is None:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
+            
+    def extract_public_message_attrs(self, message: discord.Message) -> dict:
+        """
+        Return a dict of all public, non‑callable attributes on a discord.Message.
+        Skips private attrs (starting with '_') and anything that raises on getattr.
+        """
+        attrs = {}
+        for name in dir(message):
+            if name.startswith("_"):
+                continue
+
+            try:
+                value = getattr(message, name)
+            except Exception:
+                continue
+
+            if callable(value):
+                continue
+
+            attrs[name] = value
+        return attrs
 
     def should_ignore(self, message: discord.Message) -> bool:
         """
         Skip:
-         - messages from any bot
-         - DMs or messages not in our configured guild
-         - messages in explicitly excluded channels
-         - messages containing a blocked keyword
+        - system messages (joins/leaves/pins/etc)
+        - DMs or messages not in our configured guild
+        - messages containing a blocked keyword
         """
-        # ignore DMs or the wrong guild
+        # Ignore DMs or wrong guild
         if message.guild is None or message.guild.id != self.host_guild_id:
-            logger.debug("[IGNORED] Dropping message %s:", message.id)
+            logger.debug("[IGNORED] Dropping message %s: not in host guild", message.id)
             return True
-
-        # ignore blocked keywords
+        
+        # Ignore blocked keywords
         content = message.content.lower()
         for kw in self.blocked_keywords:
             if kw in content:
@@ -239,6 +261,16 @@ class ClientListener:
     async def on_message(self, message: discord.Message):
         if self.should_ignore(message):
             return
+        
+        # Normalize content and detect system messages
+        raw = message.content or ""
+        system = getattr(message, "system_content", "") or ""
+        if not raw and system:
+            content = system
+            author = "System"
+        else:
+            content = raw
+            author = message.author.name
 
         attachments = [
             {
@@ -258,13 +290,13 @@ class ClientListener:
             "type": "thread_message" if is_thread else "message",
             "data": {
                 "channel_id": message.channel.id,
-                "author": message.author.name,
+                "author": author,
                 "avatar_url": (
                     str(message.author.display_avatar.url)
                     if message.author.display_avatar
                     else None
                 ),
-                "content": message.content,
+                "content": content,
                 "timestamp": str(message.created_at),
                 "attachments": attachments,
                 "components": components,
@@ -280,17 +312,18 @@ class ClientListener:
                 ),
             },
         }
-        logger.debug(f"Sending payload: {payload}")
         await self.ws.send(payload)
         logger.info(
             "Forwarded msg from %s",
             message.author.name,
         )
+        
+        # Pull message attributes for debugging
+        msg_attrs = self.extract_public_message_attrs(message)
+
         logger.debug(
-            "Forwarded msg from %s (embeds=%d, atts=%d)",
-            message.author.name,
-            len(embeds),
-            len(attachments),
+            "Full Message attributes:\n%s",
+            pprint.pformat(msg_attrs, indent=2, width=120)
         )
 
     async def on_thread_delete(self, thread: discord.Thread):

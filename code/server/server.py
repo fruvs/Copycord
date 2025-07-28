@@ -51,7 +51,7 @@ logger = logging.getLogger("server")
 class ServerReceiver:
     def __init__(self):
         self.config = Config()
-        self.bot = discord.Bot(intents=discord.Intents.all(), sync_commands=False)
+        self.bot = discord.Bot(intents=discord.Intents.all())
         self.ws = WebsocketManager(
             send_url=self.config.CLIENT_WS_URL,
             listen_host=self.config.SERVER_WS_HOST,
