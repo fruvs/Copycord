@@ -1,10 +1,19 @@
 import signal
 import asyncio
 import logging
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Union
 import aiohttp
 import discord
-from discord import NotFound, Webhook, ChannelType, Embed
+from discord import (
+    ForumChannel,
+    NotFound,
+    Webhook,
+    ChannelType,
+    Embed,
+    Guild,
+    TextChannel,
+    CategoryChannel,
+)
 from discord.errors import HTTPException, Forbidden
 import os
 import sys
@@ -72,6 +81,10 @@ class ServerReceiver:
         self._pending_msgs: dict[int, list[dict]] = {}
         self._pending_thread_msgs: List[Dict] = []
         orig_on_connect = self.bot.on_connect
+        # Discord guild/channel limits
+        self.MAX_GUILD_CHANNELS = 500
+        self.MAX_CATEGORIES = 50
+        self.MAX_CHANNELS_PER_CATEGORY = 50
 
         async def _command_sync():
             try:
@@ -390,6 +403,8 @@ class ServerReceiver:
                 already_there = bool(old_clone_id and guild.get_channel(old_clone_id))
 
                 clone_cat = await self._ensure_category(guild, orig_cat_id, cat["name"])
+                if clone_cat is None:
+                    continue
                 if not already_there:
                     created_cat += 1
                     for row in self.db.get_all_channel_mappings():
@@ -398,13 +413,23 @@ class ServerReceiver:
                         ch = guild.get_channel(row["cloned_channel_id"])
                         if not ch or ch.category_id == clone_cat.id:
                             continue
-                        await ch.edit(category=clone_cat)
-                        logger.info(
-                            "Reparented channel ID %d → category '%s' (ID %d)",
-                            ch.id,
-                            clone_cat.name,
-                            clone_cat.id,
-                        )
+
+                        if not self._can_create_in_category(guild, clone_cat):
+                            logger.warning(
+                                "Cannot move channel %d into full category '%s'; leaving it standalone",
+                                ch.id,
+                                clone_cat.name,
+                            )
+                            await ch.edit(category=None)
+                        else:
+                            await ch.edit(category=clone_cat)
+                            logger.info(
+                                "Reparented channel ID %d → category '%s' (ID %d)",
+                                ch.id,
+                                clone_cat.name,
+                                clone_cat.id,
+                            )
+
                         self.db.upsert_channel_mapping(
                             row["original_channel_id"],
                             row["original_channel_name"],
@@ -447,15 +472,10 @@ class ServerReceiver:
                 if existed:
                     clone_forum = guild.get_channel(fm["cloned_channel_id"])
                 else:
-                    clone_forum = await guild.create_forum_channel(
-                        name=forum["name"], category=parent
+                    clone_forum = await self._create_channel(
+                        guild, "forum", forum["name"], parent
                     )
-                    logger.info(
-                        "Created forum channel %s #%d under category %s",
-                        forum["name"],
-                        clone_forum.id,
-                        parent.name if parent else "standalone",
-                    )
+
                     created_forums += 1
 
                 self.db.upsert_channel_mapping(
@@ -737,6 +757,64 @@ class ServerReceiver:
             )
         return items
 
+    def _can_create_category(self, guild: discord.Guild) -> bool:
+        return (
+            len(guild.categories) < self.MAX_CATEGORIES
+            and len(guild.channels) < self.MAX_GUILD_CHANNELS
+        )
+
+    def _can_create_in_category(
+        self, guild: discord.Guild, category: Optional[discord.CategoryChannel]
+    ) -> bool:
+        if category is None:
+            return len(guild.channels) < self.MAX_GUILD_CHANNELS
+        return (
+            len(category.channels) < self.MAX_CHANNELS_PER_CATEGORY
+            and len(guild.channels) < self.MAX_GUILD_CHANNELS
+        )
+
+    async def _create_channel(
+        self, guild: Guild, kind: str, name: str, category: CategoryChannel | None
+    ) -> Union[TextChannel, ForumChannel]:
+        """
+        Create a channel of `kind` ('text'|'news'|'forum') named `name` under
+        `category`.  If the category or guild is at capacity, it falls back to
+        standalone (category=None).  Returns the created channel object.
+        """
+        if not self._can_create_in_category(guild, category):
+            cat_label = category.name if category else "<root>"
+            logger.warning(
+                "Category %s full (or guild at cap); creating '%s' as standalone",
+                cat_label,
+                name,
+            )
+            category = None
+
+        if kind == "forum":
+            ch = await guild.create_forum_channel(name=name, category=category)
+        else:
+
+            ch = await guild.create_text_channel(name=name, category=category)
+
+        logger.info("Created %s channel '%s' (ID %d)", kind, name, ch.id)
+
+        if kind == "news":
+            if "NEWS" in guild.features:
+                try:
+                    await ch.edit(type=ChannelType.news)
+                    logger.info("Converted '%s' #%d to Announcement", name, ch.id)
+                except HTTPException as e:
+                    logger.warning(
+                        "Could not convert '%s' to Announcement: %s; left as text",
+                        name,
+                        e,
+                    )
+            else:
+                logger.warning(
+                    "Guild %s doesn’t support NEWS; '%s' left as text", guild.id, name
+                )
+        return ch
+
     async def _handle_removed_categories(
         self, guild: discord.Guild, sitemap: Dict
     ) -> int:
@@ -810,13 +888,23 @@ class ServerReceiver:
 
     async def _ensure_category(
         self, guild: discord.Guild, original_id: int, original_name: str
-    ) -> discord.CategoryChannel:
+    ) -> Optional[CategoryChannel]:
         for row in self.db.get_all_category_mappings():
             if row["original_category_id"] == original_id:
                 c = guild.get_channel(row["cloned_category_id"])
                 if c:
                     logger.debug("Reusing category mapping %d → %d", original_id, c.id)
                     return c
+        if not self._can_create_category(guild):
+            logger.warning(
+                "Cannot create new category '%s': guild has %d/%d channels or %d/%d categories",
+                original_name,
+                len(guild.channels),
+                self.MAX_GUILD_CHANNELS,
+                len(guild.categories),
+                self.MAX_CATEGORIES,
+            )
+            return None
         clone = await guild.create_category(original_name)
         logger.info(
             "Created category %s",
@@ -838,8 +926,7 @@ class ServerReceiver:
         channel_type: int,
     ) -> Tuple[int, int, str]:
         """
-        Returns (original_id, cloned_channel_id, webhook_url).
-        If the cloned channel or webhook was deleted, re‑create as needed.
+        Re‑creates channel or webhook as needed.
         """
         for row in self.db.get_all_channel_mappings():
             if row["original_channel_id"] != original_id:
@@ -853,6 +940,7 @@ class ServerReceiver:
                 if ch:
                     if wh_url:
                         return original_id, clone_id, wh_url
+                    # recreate missing webhook
                     wh = await ch.create_webhook(name="Copycord")
                     url = f"https://discord.com/api/webhooks/{wh.id}/{wh.token}"
                     self.db.upsert_channel_mapping(
@@ -874,48 +962,14 @@ class ServerReceiver:
         if parent_id is not None:
             category = await self._ensure_category(guild, parent_id, parent_name)
 
-        if channel_type == ChannelType.news.value:
-            ch = await guild.create_text_channel(name=original_name, category=category)
-            logger.info(
-                "Created Text Channel %s #%d",
-                original_name,
-                ch.id,
-            )
-
-            if "NEWS" in guild.features:
-                try:
-                    await ch.edit(type=ChannelType.news)
-                    logger.info(
-                        "Converted '%s' #%d to type Announcement",
-                        original_name,
-                        ch.id,
-                    )
-                except HTTPException as e:
-                    logger.warning(
-                        "Failed to convert channel #%d to Announcement: %s. Leaving as text.",
-                        ch.id,
-                        e,
-                    )
-            else:
-                logger.warning(
-                    "Your Guild %s doesn’t support Announcement channels, it is not a community server; creating '%s' as a regular text channel",
-                    guild.id,
-                    original_name,
-                )
-
-        else:
-            ch = await guild.create_text_channel(name=original_name, category=category)
-            logger.info(
-                "Created Text channel %s #%d",
-                original_name,
-                ch.id,
-            )
+        kind = "news" if channel_type == ChannelType.news.value else "text"
+        ch = await self._create_channel(guild, kind, original_name, category)
 
         await self._cooldown()
 
         wh = await ch.create_webhook(name="Clonecord")
         url = f"https://discord.com/api/webhooks/{wh.id}/{wh.token}"
-        logger.info("Created webhook in %s", original_name)
+        logger.debug("Created webhook in %s", original_name)
 
         self.db.upsert_channel_mapping(
             original_id,
@@ -936,10 +990,10 @@ class ServerReceiver:
     ) -> int:
         """
         Re‑parent cloned channels whenever the expected parent (from DB) doesn't
-        match what’s actually on Discord—whether because the master moved it, or
-        someone manually yanked it out of its category in the clone.
+        match what’s actually on Discord.
         """
         moved = 0
+
         for item in incoming:
             orig_id = item["id"]
             row = next(
@@ -956,23 +1010,47 @@ class ServerReceiver:
 
             actual_clone = ch.category.id if ch.category else None
 
-            if actual_clone != expected_clone:
-                if expected_clone is None:
-                    await ch.edit(category=None)
-                    logger.info("Reparented clone ID %d → standalone", clone_id)
-                    await self._cooldown()
-                else:
-                    cat_clone = guild.get_channel(expected_clone)
-                    if cat_clone:
-                        await ch.edit(category=cat_clone)
-                        logger.info(
-                            "Reparented clone ID %d → category '%s' (ID %d)",
-                            clone_id,
-                            cat_clone.name,
-                            expected_clone,
-                        )
-                        await self._cooldown()
+            if actual_clone == expected_clone:
+                continue
+
+            if expected_clone is None:
+                await ch.edit(category=None)
+                logger.info("Reparented clone ID %d → standalone", clone_id)
                 moved += 1
+                await self._cooldown()
+                continue
+
+            cat_clone = guild.get_channel(expected_clone)
+            if not isinstance(cat_clone, discord.CategoryChannel):
+                logger.warning(
+                    "Target category ID %d not found; leaving channel %d standalone",
+                    expected_clone,
+                    clone_id,
+                )
+                await ch.edit(category=None)
+                moved += 1
+                await self._cooldown()
+                continue
+
+            if not self._can_create_in_category(guild, cat_clone):
+                logger.warning(
+                    "Category '%s' (ID %d) full; leaving channel %d standalone",
+                    cat_clone.name,
+                    cat_clone.id,
+                    clone_id,
+                )
+                await ch.edit(category=None)
+            else:
+                await ch.edit(category=cat_clone)
+                logger.info(
+                    "Reparented clone ID %d → category '%s' (ID %d)",
+                    clone_id,
+                    cat_clone.name,
+                    cat_clone.id,
+                )
+
+            moved += 1
+            await self._cooldown()
 
         return moved
 
@@ -990,7 +1068,10 @@ class ServerReceiver:
             None,
         )
         if not row:
-            logger.error("No DB row for #%s; cannot recreate webhook, are we fully synced?", original_id)
+            logger.error(
+                "No DB row for #%s; cannot recreate webhook, are we fully synced?",
+                original_id,
+            )
             return None
 
         cloned_id = row["cloned_channel_id"]
@@ -1033,7 +1114,7 @@ class ServerReceiver:
                 row["cloned_parent_category_id"],
             )
 
-            logger.info("Recreated webhook for #%s", original_id)
+            logger.debug("Recreated webhook for #%s", original_id)
             await self._cooldown()
             return url
 
@@ -1128,6 +1209,15 @@ class ServerReceiver:
                     data_json = await resp.json()
 
                 new_thread_id = int(data_json["channel_id"])
+
+                try:
+                    await self._enforce_thread_limit(cloned_parent)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to enforce thread limit on forum %s: %s",
+                        cloned_parent.id,
+                        e,
+                    )
 
             elif isinstance(cloned_parent, discord.TextChannel):
                 new_thread = await cloned_parent.create_thread(
