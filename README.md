@@ -58,12 +58,12 @@ _Love this project? Give it a ⭐️ and let others know!_
 
 3. **Create and configure the bot**  
    - In the [Discord Developer Portal](https://discord.com/developers/applications), create a new bot.
-   - Under Installation, set the Install Link to `None` and click save.
-   - Under “Bot”, click reset token and store your bot token somewhere secure, disable `Public Bot`, and enable these intents:  
+   - Under **Installation**, set the Install Link to `None` and click save.
+   - Under **Bot**, click reset token and store your bot token somewhere secure, disable `Public Bot`, and enable these intents:  
      - `Presence`  
      - `Server Members`  
      - `Message Content`  
-   - Under "OAuth2", generate an invite url with (Scopes: `bot`, Bot Permissions: `Administrator`) and invite the bot to your clone server.
+   - Under **OAuth2**, generate an invite url with (Scopes: `bot`, Bot Permissions: `Administrator`) and invite the bot to your clone server.
 
 ## Configuration
 
