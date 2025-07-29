@@ -69,6 +69,9 @@ class ServerReceiver:
         self.bot.event(self.on_ready)
         self._ws_task: asyncio.Task | None = None
         self._sitemap_task: asyncio.Task | None = None
+        self._pending_msgs: dict[int, list[dict]] = {}
+        self._pending_thread_msgs: List[Dict] = []
+        
         orig_on_connect = self.bot.on_connect
 
         async def _command_sync():
@@ -165,7 +168,7 @@ class ServerReceiver:
         delay = self._backoff_delay
         logger.debug(f"Backing off for {delay}s before next action")
         await asyncio.sleep(delay)
-        self._backoff_delay = min(self._backoff_delay * 2, 15)
+        self._backoff_delay = min(self._backoff_delay * 2, 10)
 
     async def sync_structure(self, task_id: int, sitemap: Dict) -> str:
         logging.debug(f"Received sitemap {sitemap}")
@@ -176,425 +179,438 @@ class ServerReceiver:
                 logger.error("Clone guild %s not found", self.clone_guild_id)
                 return
 
-        comm = sitemap.get("community", {})
-        rules_id = comm.get("rules_channel_id")
-        updates_id = comm.get("public_updates_channel_id")
-        
-        # ─── COMMUNITY SUPPORT CHECK ────────────────────────────────
-        # Does the sitemap ask for community mode?
-        want_comm = bool(comm.get("enabled"))
-        # Does this guild actually support Community features?
-        supports_comm = "COMMUNITY" in guild.features
-        if want_comm and not supports_comm:
-            logger.warning(
-                "Guild %s doesn’t support Community, some features will be disabled; Please enable it manually in the guild settings.",
-                guild.name
-            )
-            want_comm = False
-
-
-        logger.debug(
-            "Sync #%d: sitemap has %d categories and %d standalone channels",
-            task_id,
-            len(sitemap.get("categories", [])),
-            len(sitemap.get("standalone_channels", [])),
-        )
-
-        if not want_comm and supports_comm:
-            try:
-                await guild.edit(community=False)
-                logger.info("Disabled Community mode on clone guild %s", guild.id)
-            except Forbidden as e:
+            comm = sitemap.get("community", {})
+            rules_id = comm.get("rules_channel_id")
+            updates_id = comm.get("public_updates_channel_id")
+            
+            # ─── COMMUNITY SUPPORT CHECK ────────────────────────────────
+            # Does the sitemap ask for community mode?
+            want_comm = bool(comm.get("enabled"))
+            # Does this guild actually support Community features?
+            supports_comm = "COMMUNITY" in guild.features
+            if want_comm and not supports_comm:
                 logger.warning(
-                    "Cannot disable Community mode on guild %s (missing permission): %s",
-                    guild.id, e
+                    "Guild %s doesn’t support Community, some features will be disabled; Please enable it manually in the guild settings.",
+                    guild.name
                 )
-            except Exception as e:
-                logger.error(
-                    "Failed to disable Community on clone guild %s: %s", guild.id, e
-                )
+                want_comm = False
 
-        if want_comm and rules_id and updates_id:
-            for orig_chan_id in (rules_id, updates_id):
-                item = next(
+
+            logger.debug(
+                "Sync #%d: sitemap has %d categories and %d standalone channels",
+                task_id,
+                len(sitemap.get("categories", [])),
+                len(sitemap.get("standalone_channels", [])),
+            )
+
+            if not want_comm and supports_comm:
+                try:
+                    await guild.edit(community=False)
+                    logger.info("Disabled Community mode on clone guild %s", guild.id)
+                except Forbidden as e:
+                    logger.warning(
+                        "Cannot disable Community mode on guild %s (missing permission): %s",
+                        guild.id, e
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to disable Community on clone guild %s: %s", guild.id, e
+                    )
+
+            if want_comm and rules_id and updates_id:
+                for orig_chan_id in (rules_id, updates_id):
+                    item = next(
+                        (
+                            i
+                            for i in self._parse_sitemap(sitemap)
+                            if i["id"] == orig_chan_id
+                        ),
+                        None,
+                    )
+                    if item:
+                        await self._ensure_channel_and_webhook(
+                            guild,
+                            item["id"],
+                            item["name"],
+                            item["parent_id"],
+                            item["parent_name"],
+                            item["type"],
+                        )
+
+            if want_comm:
+                rules_map = next(
                     (
-                        i
-                        for i in self._parse_sitemap(sitemap)
-                        if i["id"] == orig_chan_id
+                        r
+                        for r in self.db.get_all_channel_mappings()
+                        if r["original_channel_id"] == rules_id
                     ),
                     None,
                 )
-                if item:
-                    await self._ensure_channel_and_webhook(
-                        guild,
-                        item["id"],
-                        item["name"],
-                        item["parent_id"],
-                        item["parent_name"],
-                        item["type"],
-                    )
+                updates_map = next(
+                    (
+                        r
+                        for r in self.db.get_all_channel_mappings()
+                        if r["original_channel_id"] == updates_id
+                    ),
+                    None,
+                )
+                if rules_map and updates_map:
+                    rules_chan = guild.get_channel(rules_map["cloned_channel_id"])
+                    updates_chan = guild.get_channel(updates_map["cloned_channel_id"])
+                    if rules_chan and updates_chan:
+                        need_enable = "COMMUNITY" not in guild.features
+                        current_rules = (
+                            guild.rules_channel.id if guild.rules_channel else None
+                        )
+                        current_updates = (
+                            guild.public_updates_channel.id
+                            if guild.public_updates_channel
+                            else None
+                        )
+                        need_update = (
+                            current_rules != rules_chan.id
+                            or current_updates != updates_chan.id
+                        )
 
-        if want_comm:
-            rules_map = next(
-                (
-                    r
-                    for r in self.db.get_all_channel_mappings()
-                    if r["original_channel_id"] == rules_id
-                ),
-                None,
-            )
-            updates_map = next(
-                (
-                    r
-                    for r in self.db.get_all_channel_mappings()
-                    if r["original_channel_id"] == updates_id
-                ),
-                None,
-            )
-            if rules_map and updates_map:
-                rules_chan = guild.get_channel(rules_map["cloned_channel_id"])
-                updates_chan = guild.get_channel(updates_map["cloned_channel_id"])
-                if rules_chan and updates_chan:
-                    need_enable = "COMMUNITY" not in guild.features
-                    current_rules = (
-                        guild.rules_channel.id if guild.rules_channel else None
+                        if need_enable or need_update:
+                            try:
+                                await guild.edit(
+                                    community=True,
+                                    rules_channel=rules_chan,
+                                    public_updates_channel=updates_chan,
+                                )
+                                logger.info(
+                                    "%s Community mode on clone guild %s, set rules=%s updates=%s",
+                                    "Enabled" if need_enable else "Updated",
+                                    guild.id,
+                                    rules_chan.id,
+                                    updates_chan.id,
+                                )
+                            except Forbidden as e:
+                                logger.warning(
+                                    "Cannot enable/update Community mode on guild %s (missing permission): %s",
+                                    guild.id, e
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "Failed to enable/update Community mode on clone guild %s: %s",
+                                    guild.id, e
+                                )
+
+            if want_comm and rules_id and updates_id:
+                for orig_chan_id in (rules_id, updates_id):
+                    item = next(
+                        (
+                            i
+                            for i in sitemap.get("standalone_channels", [])
+                            + [
+                                ch
+                                for cat in sitemap.get("categories", [])
+                                for ch in cat["channels"]
+                            ]
+                            if i["id"] == orig_chan_id
+                        ),
+                        None,
                     )
-                    current_updates = (
-                        guild.public_updates_channel.id
-                        if guild.public_updates_channel
+                    mapping = next(
+                        (
+                            r
+                            for r in self.db.get_all_channel_mappings()
+                            if r["original_channel_id"] == orig_chan_id
+                        ),
+                        None,
+                    )
+                    if not item or not mapping:
+                        continue
+
+                    clone_chan = guild.get_channel(mapping["cloned_channel_id"])
+                    if clone_chan and clone_chan.name != item["name"]:
+                        old = clone_chan.name
+                        await clone_chan.edit(name=item["name"])
+                        logger.info(
+                            "Renamed community channel '%s' → '%s' (ID %d)",
+                            old,
+                            item["name"],
+                            clone_chan.id,
+                        )
+                        self.db.upsert_channel_mapping(
+                            orig_chan_id,
+                            item["name"],
+                            mapping["cloned_channel_id"],
+                            mapping["channel_webhook_url"],
+                            mapping["original_parent_category_id"],
+                            mapping["cloned_parent_category_id"],
+                        )
+                        await self._cooldown()
+
+            removed_cat = await self._handle_removed_categories(guild, sitemap)
+            removed_chan = await self._handle_removed_channels(
+                guild, self._parse_sitemap(sitemap)
+            )
+
+            renamed_cat = await self._handle_renamed_categories(guild, sitemap)
+
+            old_map = {
+                r["original_channel_id"]: r["original_parent_category_id"]
+                for r in self.db.get_all_channel_mappings()
+            }
+
+            self._sync_db_with_sitemap(sitemap)
+
+            created_cat = 0
+            for cat in sitemap.get("categories", []):
+                orig_cat_id = cat["id"]
+                mapping = next(
+                    (
+                        r
+                        for r in self.db.get_all_category_mappings()
+                        if r["original_category_id"] == orig_cat_id
+                    ),
+                    None,
+                )
+                old_clone_id = mapping and mapping["cloned_category_id"]
+                already_there = bool(old_clone_id and guild.get_channel(old_clone_id))
+
+                clone_cat = await self._ensure_category(guild, orig_cat_id, cat["name"])
+                if not already_there:
+                    created_cat += 1
+                    for row in self.db.get_all_channel_mappings():
+                        if row["original_parent_category_id"] != orig_cat_id:
+                            continue
+                        ch = guild.get_channel(row["cloned_channel_id"])
+                        if not ch or ch.category_id == clone_cat.id:
+                            continue
+                        await ch.edit(category=clone_cat)
+                        logger.info(
+                            "Reparented channel ID %d → category '%s' (ID %d)",
+                            ch.id,
+                            clone_cat.name,
+                            clone_cat.id,
+                        )
+                        self.db.upsert_channel_mapping(
+                            row["original_channel_id"],
+                            row["original_channel_name"],
+                            row["cloned_channel_id"],
+                            row["channel_webhook_url"],
+                            row["original_parent_category_id"],
+                            clone_cat.id,
+                        )
+                        await self._cooldown()
+
+            created_forums = 0
+            for forum in sitemap.get("forums", []):
+                orig_forum_id = forum["id"]
+                fm = next(
+                    (
+                        r
+                        for r in self.db.get_all_channel_mappings()
+                        if r["original_channel_id"] == orig_forum_id
+                    ),
+                    None,
+                )
+
+                parent = None
+                if forum.get("category_id") is not None:
+                    cat_map = next(
+                        (
+                            c
+                            for c in self.db.get_all_category_mappings()
+                            if c["original_category_id"] == forum["category_id"]
+                        ),
+                        None,
+                    )
+                    parent = (
+                        guild.get_channel(cat_map["cloned_category_id"])
+                        if cat_map
                         else None
                     )
-                    need_update = (
-                        current_rules != rules_chan.id
-                        or current_updates != updates_chan.id
+
+                existed = bool(fm and guild.get_channel(fm["cloned_channel_id"]))
+                if existed:
+                    clone_forum = guild.get_channel(fm["cloned_channel_id"])
+                else:
+                    clone_forum = await guild.create_forum_channel(
+                        name=forum["name"], category=parent
                     )
+                    logger.info(
+                        "Created forum channel '%s' (ID %d) under category '%s' for source %d",
+                        forum["name"],
+                        clone_forum.id,
+                        parent.name if parent else "standalone",
+                        orig_forum_id,
+                    )
+                    created_forums += 1
 
-                    if need_enable or need_update:
-                        try:
-                            await guild.edit(
-                                community=True,
-                                rules_channel=rules_chan,
-                                public_updates_channel=updates_chan,
-                            )
-                            logger.info(
-                                "%s Community mode on clone guild %s, set rules=%s updates=%s",
-                                "Enabled" if need_enable else "Updated",
-                                guild.id,
-                                rules_chan.id,
-                                updates_chan.id,
-                            )
-                        except Forbidden as e:
-                            logger.warning(
-                                "Cannot enable/update Community mode on guild %s (missing permission): %s",
-                                guild.id, e
-                            )
-                        except Exception as e:
-                            logger.error(
-                                "Failed to enable/update Community mode on clone guild %s: %s",
-                                guild.id, e
-                            )
-
-        if want_comm and rules_id and updates_id:
-            for orig_chan_id in (rules_id, updates_id):
-                item = next(
-                    (
-                        i
-                        for i in sitemap.get("standalone_channels", [])
-                        + [
-                            ch
-                            for cat in sitemap.get("categories", [])
-                            for ch in cat["channels"]
-                        ]
-                        if i["id"] == orig_chan_id
-                    ),
-                    None,
+                self.db.upsert_channel_mapping(
+                    orig_forum_id,
+                    forum["name"],
+                    clone_forum.id,
+                    fm["channel_webhook_url"] if existed else None,
+                    forum["category_id"],
+                    parent.id if parent else None,
                 )
+                await self._cooldown()
+                if not existed:
+                    new_url = await self._recreate_webhook(orig_forum_id)
+                    if not new_url:
+                        logger.error("Failed to create webhook for forum %s", orig_forum_id)
+
+            incoming = self._parse_sitemap(sitemap)
+            created_chan = renamed_chan = 0
+            for item in incoming:
+                if comm.get("enabled") and item["id"] in (rules_id, updates_id):
+                    continue
                 mapping = next(
                     (
                         r
                         for r in self.db.get_all_channel_mappings()
-                        if r["original_channel_id"] == orig_chan_id
+                        if r["original_channel_id"] == item["id"]
                     ),
                     None,
                 )
-                if not item or not mapping:
+                real_clone = None
+                if mapping and mapping["cloned_channel_id"] is not None:
+                    real_clone = guild.get_channel(mapping["cloned_channel_id"])
+                is_new = mapping is None or real_clone is None
+
+                orig_id, clone_id, _ = await self._ensure_channel_and_webhook(
+                    guild,
+                    item["id"],
+                    item["name"],
+                    item["parent_id"],
+                    item["parent_name"],
+                    item["type"],
+                )
+                if is_new:
+                    created_chan += 1
+
+                ch = guild.get_channel(clone_id)
+                if ch and ch.name != item["name"]:
+                    old = ch.name
+                    await ch.edit(name=item["name"])
+                    renamed_chan += 1
+                    logger.info(
+                        "Renamed channel '%s' → '%s' (ID %d)",
+                        old,
+                        item["name"],
+                        clone_id,
+                    )
+                    await self._cooldown()
+
+            moved_master = await self._handle_master_channel_moves(guild, incoming, old_map)
+
+            delete_remote = getattr(self.config, "DELETE_CLONED_THREADS", True)
+            valid_threads = {rec["id"] for rec in sitemap.get("threads", [])}
+            deleted_threads = 0
+
+            for row in self.db.get_all_threads():
+                orig_id = row["original_thread_id"]
+                clone_id = row["cloned_thread_id"]
+
+                if orig_id not in valid_threads:
+                    if delete_remote:
+                        guild = self.bot.get_guild(self.clone_guild_id)
+                        if guild:
+                            ch = guild.get_channel(clone_id)
+                            if not ch:
+                                try:
+                                    ch = await self.bot.fetch_channel(clone_id)
+                                except discord.NotFound:
+                                    ch = None
+                            if ch:
+                                if self.config.DELETE_THREADS:
+                                    try:
+                                        await ch.delete()
+                                        logger.info(
+                                            "Deleted cloned thread %s for original %s",
+                                            clone_id,
+                                            orig_id,
+                                        )
+                                    except Exception as e:
+                                        logger.error(
+                                            "Failed deleting cloned thread %s: %s",
+                                            clone_id,
+                                            e,
+                                        )
+
+                    self.db.delete_forum_thread_mapping(orig_id)
+                    deleted_threads += 1
+
+            renamed_threads = 0
+            for src in sitemap.get("threads", []):
+                orig_tid = src["id"]
+                new_name = src["name"]
+                mapping = next(
+                    (
+                        r
+                        for r in self.db.get_all_threads()
+                        if r["original_thread_id"] == orig_tid
+                    ),
+                    None,
+                )
+                if not mapping:
                     continue
 
-                clone_chan = guild.get_channel(mapping["cloned_channel_id"])
-                if clone_chan and clone_chan.name != item["name"]:
-                    old = clone_chan.name
-                    await clone_chan.edit(name=item["name"])
-                    logger.info(
-                        "Renamed community channel '%s' → '%s' (ID %d)",
-                        old,
-                        item["name"],
-                        clone_chan.id,
-                    )
-                    self.db.upsert_channel_mapping(
-                        orig_chan_id,
-                        item["name"],
-                        mapping["cloned_channel_id"],
-                        mapping["channel_webhook_url"],
-                        mapping["original_parent_category_id"],
-                        mapping["cloned_parent_category_id"],
-                    )
-                    await self._cooldown()
+                clone_tid = mapping["cloned_thread_id"]
+                ch = guild.get_channel(clone_tid) or await self.bot.fetch_channel(clone_tid)
+                if ch and ch.name != new_name:
+                    old = ch.name
+                    try:
+                        await ch.edit(name=new_name)
+                        logger.info(
+                            "Renamed cloned thread '%s' → '%s' (ID %d)",
+                            old,
+                            new_name,
+                            clone_tid,
+                        )
+                        self.db.upsert_forum_thread_mapping(
+                            orig_tid,
+                            new_name,
+                            clone_tid,
+                            mapping["original_thread_id"],
+                            mapping["cloned_thread_id"],
+                        )
+                        renamed_threads += 1
+                        await self._cooldown()
+                    except Exception as e:
+                        logger.error("Failed renaming thread %d: %s", clone_tid, e)
 
-        removed_cat = await self._handle_removed_categories(guild, sitemap)
-        removed_chan = await self._handle_removed_channels(
-            guild, self._parse_sitemap(sitemap)
-        )
+            parts = []
+            if removed_cat:
+                parts.append(f"Deleted {removed_cat} stale categories")
+            if removed_chan:
+                parts.append(f"Deleted {removed_chan} stale channels")
+            if renamed_cat:
+                parts.append(f"Renamed {renamed_cat} categories")
+            if created_cat:
+                parts.append(f"Created {created_cat} categories")
+            if created_forums:
+                parts.append(f"Created {created_forums} forum channels")
+            if created_chan:
+                parts.append(f"Created {created_chan} channels")
+            if renamed_chan:
+                parts.append(f"Renamed {renamed_chan} channels")
+            if moved_master:
+                parts.append(f"Reparented {moved_master} channels")
+            if deleted_threads:
+                parts.append(f"Deleted {deleted_threads} threads")
+            if renamed_threads:
+                parts.append(f"Renamed {renamed_threads} threads")
+            if not parts:
+                parts.append("No changes detected")
+                
+        # Flush regular-message buffer
+        for source_id, msgs in list(self._pending_msgs.items()):
+            for msg in msgs:
+                await asyncio.sleep(0.5)               
+                await self.forward_message(msg)
+            self._pending_msgs.pop(source_id, None)
 
-        renamed_cat = await self._handle_renamed_categories(guild, sitemap)
-
-        old_map = {
-            r["original_channel_id"]: r["original_parent_category_id"]
-            for r in self.db.get_all_channel_mappings()
-        }
-
-        self._sync_db_with_sitemap(sitemap)
-
-        created_cat = 0
-        for cat in sitemap.get("categories", []):
-            orig_cat_id = cat["id"]
-            mapping = next(
-                (
-                    r
-                    for r in self.db.get_all_category_mappings()
-                    if r["original_category_id"] == orig_cat_id
-                ),
-                None,
-            )
-            old_clone_id = mapping and mapping["cloned_category_id"]
-            already_there = bool(old_clone_id and guild.get_channel(old_clone_id))
-
-            clone_cat = await self._ensure_category(guild, orig_cat_id, cat["name"])
-            if not already_there:
-                created_cat += 1
-                for row in self.db.get_all_channel_mappings():
-                    if row["original_parent_category_id"] != orig_cat_id:
-                        continue
-                    ch = guild.get_channel(row["cloned_channel_id"])
-                    if not ch or ch.category_id == clone_cat.id:
-                        continue
-                    await ch.edit(category=clone_cat)
-                    logger.info(
-                        "Reparented channel ID %d → category '%s' (ID %d)",
-                        ch.id,
-                        clone_cat.name,
-                        clone_cat.id,
-                    )
-                    self.db.upsert_channel_mapping(
-                        row["original_channel_id"],
-                        row["original_channel_name"],
-                        row["cloned_channel_id"],
-                        row["channel_webhook_url"],
-                        row["original_parent_category_id"],
-                        clone_cat.id,
-                    )
-                    await self._cooldown()
-
-        created_forums = 0
-        for forum in sitemap.get("forums", []):
-            orig_forum_id = forum["id"]
-            fm = next(
-                (
-                    r
-                    for r in self.db.get_all_channel_mappings()
-                    if r["original_channel_id"] == orig_forum_id
-                ),
-                None,
-            )
-
-            parent = None
-            if forum.get("category_id") is not None:
-                cat_map = next(
-                    (
-                        c
-                        for c in self.db.get_all_category_mappings()
-                        if c["original_category_id"] == forum["category_id"]
-                    ),
-                    None,
-                )
-                parent = (
-                    guild.get_channel(cat_map["cloned_category_id"])
-                    if cat_map
-                    else None
-                )
-
-            existed = bool(fm and guild.get_channel(fm["cloned_channel_id"]))
-            if existed:
-                clone_forum = guild.get_channel(fm["cloned_channel_id"])
-            else:
-                clone_forum = await guild.create_forum_channel(
-                    name=forum["name"], category=parent
-                )
-                logger.info(
-                    "Created forum channel '%s' (ID %d) under category '%s' for source %d",
-                    forum["name"],
-                    clone_forum.id,
-                    parent.name if parent else "standalone",
-                    orig_forum_id,
-                )
-                created_forums += 1
-
-            self.db.upsert_channel_mapping(
-                orig_forum_id,
-                forum["name"],
-                clone_forum.id,
-                fm["channel_webhook_url"] if existed else None,
-                forum["category_id"],
-                parent.id if parent else None,
-            )
-            await self._cooldown()
-            if not existed:
-                new_url = await self._recreate_webhook(orig_forum_id)
-                if not new_url:
-                    logger.error("Failed to create webhook for forum %s", orig_forum_id)
-
-        incoming = self._parse_sitemap(sitemap)
-        created_chan = renamed_chan = 0
-        for item in incoming:
-            if comm.get("enabled") and item["id"] in (rules_id, updates_id):
-                continue
-            mapping = next(
-                (
-                    r
-                    for r in self.db.get_all_channel_mappings()
-                    if r["original_channel_id"] == item["id"]
-                ),
-                None,
-            )
-            real_clone = None
-            if mapping and mapping["cloned_channel_id"] is not None:
-                real_clone = guild.get_channel(mapping["cloned_channel_id"])
-            is_new = mapping is None or real_clone is None
-
-            orig_id, clone_id, _ = await self._ensure_channel_and_webhook(
-                guild,
-                item["id"],
-                item["name"],
-                item["parent_id"],
-                item["parent_name"],
-                item["type"],
-            )
-            if is_new:
-                created_chan += 1
-
-            ch = guild.get_channel(clone_id)
-            if ch and ch.name != item["name"]:
-                old = ch.name
-                await ch.edit(name=item["name"])
-                renamed_chan += 1
-                logger.info(
-                    "Renamed channel '%s' → '%s' (ID %d)",
-                    old,
-                    item["name"],
-                    clone_id,
-                )
-                await self._cooldown()
-
-        moved_master = await self._handle_master_channel_moves(guild, incoming, old_map)
-
-        delete_remote = getattr(self.config, "DELETE_CLONED_THREADS", True)
-        valid_threads = {rec["id"] for rec in sitemap.get("threads", [])}
-        deleted_threads = 0
-
-        for row in self.db.get_all_threads():
-            orig_id = row["original_thread_id"]
-            clone_id = row["cloned_thread_id"]
-
-            if orig_id not in valid_threads:
-                if delete_remote:
-                    guild = self.bot.get_guild(self.clone_guild_id)
-                    if guild:
-                        ch = guild.get_channel(clone_id)
-                        if not ch:
-                            try:
-                                ch = await self.bot.fetch_channel(clone_id)
-                            except discord.NotFound:
-                                ch = None
-                        if ch:
-                            if self.config.DELETE_THREADS:
-                                try:
-                                    await ch.delete()
-                                    logger.info(
-                                        "Deleted cloned thread %s for original %s",
-                                        clone_id,
-                                        orig_id,
-                                    )
-                                except Exception as e:
-                                    logger.error(
-                                        "Failed deleting cloned thread %s: %s",
-                                        clone_id,
-                                        e,
-                                    )
-
-                self.db.delete_forum_thread_mapping(orig_id)
-                deleted_threads += 1
-
-        renamed_threads = 0
-        for src in sitemap.get("threads", []):
-            orig_tid = src["id"]
-            new_name = src["name"]
-            mapping = next(
-                (
-                    r
-                    for r in self.db.get_all_threads()
-                    if r["original_thread_id"] == orig_tid
-                ),
-                None,
-            )
-            if not mapping:
-                continue
-
-            clone_tid = mapping["cloned_thread_id"]
-            ch = guild.get_channel(clone_tid) or await self.bot.fetch_channel(clone_tid)
-            if ch and ch.name != new_name:
-                old = ch.name
-                try:
-                    await ch.edit(name=new_name)
-                    logger.info(
-                        "Renamed cloned thread '%s' → '%s' (ID %d)",
-                        old,
-                        new_name,
-                        clone_tid,
-                    )
-                    self.db.upsert_forum_thread_mapping(
-                        orig_tid,
-                        new_name,
-                        clone_tid,
-                        mapping["original_thread_id"],
-                        mapping["cloned_thread_id"],
-                    )
-                    renamed_threads += 1
-                    await self._cooldown()
-                except Exception as e:
-                    logger.error("Failed renaming thread %d: %s", clone_tid, e)
-
-        parts = []
-        if removed_cat:
-            parts.append(f"Deleted {removed_cat} stale categories")
-        if removed_chan:
-            parts.append(f"Deleted {removed_chan} stale channels")
-        if renamed_cat:
-            parts.append(f"Renamed {renamed_cat} categories")
-        if created_cat:
-            parts.append(f"Created {created_cat} categories")
-        if created_forums:
-            parts.append(f"Created {created_forums} forum channels")
-        if created_chan:
-            parts.append(f"Created {created_chan} channels")
-        if renamed_chan:
-            parts.append(f"Renamed {renamed_chan} channels")
-        if moved_master:
-            parts.append(f"Reparented {moved_master} channels")
-        if deleted_threads:
-            parts.append(f"Deleted {deleted_threads} threads")
-        if renamed_threads:
-            parts.append(f"Renamed {renamed_threads} threads")
-        if not parts:
-            parts.append("No changes detected")
+        # Flush thread-message buffer
+        for data in list(self._pending_thread_msgs):
+            await asyncio.sleep(0.5)                   
+            await self.handle_forum_message(data)
+        self._pending_thread_msgs.clear()
 
         return "; ".join(parts)
 
@@ -1033,135 +1049,136 @@ class ServerReceiver:
         return Webhook.from_url(new_url, session=session)
 
     async def handle_forum_message(self, data: dict):
-        """Create-and-forward or just-forward a thread post via the forum’s single webhook,
-        and recover automatically if the cloned thread has been deleted.
-        On first post, include who created the thread."""
-        logger.debug(
-            "Received forum_message: forum_id=%s thread_id=%s author=%s",
-            data["forum_id"],
-            data["thread_id"],
-            data["author"],
-        )
-
-        guild = self.bot.get_guild(self.clone_guild_id)
-        if not guild:
-            logger.error("Clone guild %s not available", self.clone_guild_id)
-            return
-
-        forum_map = next(
-            (
-                r
-                for r in self.db.get_all_channel_mappings()
-                if r["original_channel_id"] == data["forum_id"]
-            ),
-            None,
-        )
-        if not forum_map:
-            logger.error("No forum mapping for %s", data["forum_id"])
-            return
-
-        payload = self._build_webhook_payload(data)
-
-        thread_map = next(
-            (
-                r
-                for r in self.db.get_all_threads()
-                if r["original_thread_id"] == data["thread_id"]
-            ),
-            None,
-        )
-
-        clone_thread = None
-        if thread_map:
-            clone_thread = guild.get_channel(thread_map["cloned_thread_id"])
-            if not clone_thread:
-                try:
-                    clone_thread = await self.bot.fetch_channel(
-                        thread_map["cloned_thread_id"]
-                    )
-                except NotFound:
-                    logger.warning(
-                        "Cloned thread %s missing, recreating",
-                        thread_map["cloned_thread_id"],
-                    )
-                    self.db.delete_forum_thread_mapping(data["thread_id"])
-                    thread_map = None
-                    clone_thread = None
-
-        session = aiohttp.ClientSession()
-        wh = Webhook.from_url(forum_map["channel_webhook_url"], session=session)
-
-        if thread_map is None:
-            logger.info(
-                "Creating new thread '%s' in forum %s by %s",
-                data["thread_name"],
-                data["forum_id"],
-                data["author"],
-            )
-
-            cloned_parent = guild.get_channel(forum_map["cloned_channel_id"])
-
-            if isinstance(cloned_parent, discord.ForumChannel):
-                base_url = forum_map["channel_webhook_url"]
-                sep = "&" if "?" in base_url else "?"
-                exec_url = f"{base_url}{sep}wait=true"
-
-                async with session.post(
-                    exec_url, json={**payload, "thread_name": data["thread_name"]}
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        logger.error(
-                            "Webhook create-thread failed: %s %s", resp.status, body
-                        )
-                        await session.close()
-                        return
-                    data_json = await resp.json()
-
-                new_thread_id = int(data_json["channel_id"])
-
-            elif isinstance(cloned_parent, discord.TextChannel):
-                new_thread = await cloned_parent.create_thread(
-                    name=data["thread_name"],
-                    type=discord.ChannelType.public_thread,
-                    auto_archive_duration=1440,
+            # Buffer forum messages during sync
+            if self._sync_lock.locked():
+                logger.info(
+                    "Sync in progress; forum message for forum %s thread %s will be sent after sync.",
+                    data.get("forum_id"), data.get("thread_id")
                 )
-                new_thread_id = new_thread.id
-
-                await wh.send(**payload, thread=new_thread, wait=True)
-
-            else:
-                logger.error(
-                    "Cannot create thread in channel type %s", type(cloned_parent)
-                )
-                await session.close()
+                self._pending_thread_msgs.append(data)
                 return
 
-            self.db.upsert_forum_thread_mapping(
-                data["thread_id"],
-                data["thread_name"],
-                new_thread_id,
-                data["forum_id"],
-                forum_map["cloned_channel_id"],
+            logger.debug(
+                "Received forum_message: forum_id=%s thread_id=%s author=%s",
+                data["forum_id"], data["thread_id"], data["author"],
             )
 
-        else:
-            logger.info(
-                "Forwarding message to existing thread %s by %s",
-                thread_map["cloned_thread_id"],
-                data["author"],
+            guild = self.bot.get_guild(self.clone_guild_id)
+            if not guild:
+                logger.error("Clone guild %s not available", self.clone_guild_id)
+                return
+
+            forum_map = next(
+                (
+                    r
+                    for r in self.db.get_all_channel_mappings()
+                    if r["original_channel_id"] == data["forum_id"]
+                ),
+                None,
             )
-            try:
-                await wh.send(**payload, thread=clone_thread, wait=True)
-            except NotFound:
-                new_url = await self._recreate_webhook(data["forum_id"])
-                if not new_url:
+            if not forum_map:
+                logger.error("No forum mapping for %s", data["forum_id"])
+                return
+
+            payload = self._build_webhook_payload(data)
+
+            thread_map = next(
+                (
+                    r
+                    for r in self.db.get_all_threads()
+                    if r["original_thread_id"] == data["thread_id"]
+                ),
+                None,
+            )
+
+            clone_thread = None
+            if thread_map:
+                clone_thread = guild.get_channel(thread_map["cloned_thread_id"])
+                if not clone_thread:
+                    try:
+                        clone_thread = await self.bot.fetch_channel(
+                            thread_map["cloned_thread_id"]
+                        )
+                    except NotFound:
+                        logger.warning(
+                            "Cloned thread %s missing, recreating",
+                            thread_map["cloned_thread_id"],
+                        )
+                        self.db.delete_forum_thread_mapping(data["thread_id"])
+                        thread_map = None
+                        clone_thread = None
+
+            session = aiohttp.ClientSession()
+            wh = Webhook.from_url(forum_map["channel_webhook_url"], session=session)
+
+            if thread_map is None:
+                logger.info(
+                    "Creating new thread '%s' in forum %s by %s",
+                    data["thread_name"], data["forum_id"], data["author"],
+                )
+
+                cloned_parent = guild.get_channel(forum_map["cloned_channel_id"])
+
+                if isinstance(cloned_parent, discord.ForumChannel):
+                    base_url = forum_map["channel_webhook_url"]
+                    sep = "&" if "?" in base_url else "?"
+                    exec_url = f"{base_url}{sep}wait=true"
+
+                    async with session.post(
+                        exec_url, json={**payload, "thread_name": data["thread_name"]}
+                    ) as resp:
+                        if resp.status != 200:
+                            body = await resp.text()
+                            logger.error(
+                                "Webhook create-thread failed: %s %s", resp.status, body
+                            )
+                            await session.close()
+                            return
+                        data_json = await resp.json()
+
+                    new_thread_id = int(data_json["channel_id"])
+
+                elif isinstance(cloned_parent, discord.TextChannel):
+                    new_thread = await cloned_parent.create_thread(
+                        name=data["thread_name"],
+                        type=discord.ChannelType.public_thread,
+                        auto_archive_duration=1440,
+                    )
+                    new_thread_id = new_thread.id
+
+                    await wh.send(**payload, thread=new_thread, wait=True)
+
+                else:
+                    logger.error(
+                        "Cannot create thread in channel type %s", type(cloned_parent)
+                    )
                     await session.close()
                     return
-                wh = Webhook.from_url(new_url, session=session)
-                await wh.send(**payload, thread=clone_thread, wait=True)
 
-        await session.close()
+                self.db.upsert_forum_thread_mapping(
+                    data["thread_id"],
+                    data["thread_name"],
+                    new_thread_id,
+                    data["forum_id"],
+                    forum_map["cloned_channel_id"],
+                )
+
+            else:
+                logger.info(
+                    "Forwarding message to existing thread %s by %s",
+                    thread_map["cloned_thread_id"], data["author"],
+                )
+                try:
+                    await wh.send(**payload, thread=clone_thread, wait=True)
+                except NotFound:
+                    new_url = await self._recreate_webhook(data["forum_id"])
+                    if not new_url:
+                        await session.close()
+                        return
+                    wh = Webhook.from_url(new_url, session=session)
+                    await wh.send(**payload, thread=clone_thread, wait=True)
+
+            await session.close()
 
     async def handle_thread_delete(self, data: dict):
         """When a source thread is deleted, optionally delete its clone and always drop the DB mapping."""
@@ -1345,6 +1362,7 @@ class ServerReceiver:
     async def forward_message(self, msg: Dict):
         source_id = msg["channel_id"]
 
+        # Lookup mapping
         mapping = next(
             (
                 r
@@ -1355,11 +1373,14 @@ class ServerReceiver:
         )
         url = mapping["channel_webhook_url"] if mapping else None
 
+        # Buffer if sync in progress or no mapping yet
         if not url:
             if self._sync_lock.locked():
                 logger.info(
-                    "Sync in progress; cannot recreate webhook for %d", source_id
+                    "Sync in progress; message for %d will be sent after sync",
+                    source_id
                 )
+                self._pending_msgs.setdefault(source_id, []).append(msg)
                 return
 
             logger.warning("No webhook for %d, attempting to recreate", source_id)
@@ -1367,18 +1388,20 @@ class ServerReceiver:
             if not url:
                 return
 
+        # Build payload
         payload = self._build_webhook_payload(msg)
-        
-
-        # if our builder ever returns None, skip safely
         if payload is None:
-            logger.info("No webhook payload built for source %d; skipping", source_id)
+            logger.info(
+                "No webhook payload built for source %d; skipping",
+                source_id
+            )
             return
 
         if not payload.get("content") and not payload.get("embeds"):
             logger.info("Skipping empty message for source %d", source_id)
             return
-        
+
+        # Ensure serializable
         try:
             import json
             json.dumps(payload)
@@ -1389,10 +1412,7 @@ class ServerReceiver:
             )
             return
 
-        if not payload.get("content") and not payload.get("embeds"):
-            logger.info("Skipping empty message for source %d", source_id)
-            return
-
+        # Attempt send (with recreate-on-404)
         for attempt in (1, 2):
             try:
                 async with self.session.post(url, json=payload) as resp:
