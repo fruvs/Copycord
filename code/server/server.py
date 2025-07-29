@@ -161,11 +161,11 @@ class ServerReceiver:
                 self.sitemap_queue.task_done()
 
     async def _cooldown(self):
-        """Sleep for the current backoff delay, then double it (max 60s)."""
+        """Sleep for the current backoff delay, then double it (max 15s)."""
         delay = self._backoff_delay
         logger.debug(f"Backing off for {delay}s before next action")
         await asyncio.sleep(delay)
-        self._backoff_delay = min(self._backoff_delay * 2, 30)
+        self._backoff_delay = min(self._backoff_delay * 2, 15)
 
     async def sync_structure(self, task_id: int, sitemap: Dict) -> str:
         logging.debug(f"Received sitemap {sitemap}")
