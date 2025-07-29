@@ -140,6 +140,7 @@ class ServerReceiver:
             logger.warning("Unknown WS type '%s'", typ)
 
     async def process_sitemap_queue(self):
+        """Continuously process only the newest sitemap, discarding any others."""
         first = True
         while True:
             if not first:
@@ -148,11 +149,28 @@ class ServerReceiver:
             first = False
 
             task_id, sitemap = await self.sitemap_queue.get()
+
+            qsize = self.sitemap_queue.qsize()
+            if qsize:
+                logger.debug(
+                    "Dropping %d outdated sitemap(s), will process only the newest (task #%d).",
+                    qsize,
+                    task_id,
+                )
+            while True:
+                try:
+                    old_id, old_map = self.sitemap_queue.get_nowait()
+                    self.sitemap_queue.task_done()
+                    task_id, sitemap = old_id, old_map
+                except asyncio.QueueEmpty:
+                    break
+
             logger.debug(
                 "Starting sync task #%d (queue size then: %d)",
                 task_id,
                 self.sitemap_queue.qsize(),
             )
+
             try:
                 summary = await self.sync_structure(task_id, sitemap)
             except Exception:
