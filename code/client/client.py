@@ -243,7 +243,6 @@ class ClientListener:
         """
         # Ignore DMs or wrong guild
         if message.guild is None or message.guild.id != self.host_guild_id:
-            logger.debug("[IGNORED] Dropping message %s: not in host guild", message.id)
             return True
         
         # Ignore blocked keywords
