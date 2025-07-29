@@ -289,6 +289,7 @@ class ClientListener:
             "type": "thread_message" if is_thread else "message",
             "data": {
                 "channel_id": message.channel.id,
+                "channel_name": message.channel.name,
                 "author": author,
                 "avatar_url": (
                     str(message.author.display_avatar.url)
