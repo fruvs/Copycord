@@ -196,7 +196,6 @@ class ClientListener:
             self.debounce_task = asyncio.create_task(self._debounced_sitemap())
 
     async def on_ready(self):
-        self.config.setup_release_watcher(self)
         # Ensure we're in the clone guild
         host_guild = self.bot.get_guild(self.host_guild_id)
         if host_guild is None:

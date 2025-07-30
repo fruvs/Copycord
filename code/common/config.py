@@ -10,7 +10,7 @@ logger = logging.getLogger("config")
 
 class Config:
     def __init__(self):
-        self.CURRENT_VERSION = "v1.1.0"
+        self.CURRENT_VERSION = "v1.0.1"
         self.GITHUB_API_LATEST = (
             "https://api.github.com/repos/Copycord/Copycord/releases/latest"
         )
@@ -83,6 +83,11 @@ class Config:
         """Poll GitHub every hour and log when a new tag appears."""
         await receiver.bot.wait_until_ready()
         db = receiver.db
+        guild_id = receiver.clone_guild_id
+        
+        stored = db.get_version()
+        if stored != self.CURRENT_VERSION:
+            db.set_version(self.CURRENT_VERSION)
 
         while not receiver.bot.is_closed():
             try:
@@ -102,19 +107,30 @@ class Config:
                 tag = release.get("tag_name")
                 url = release.get("html_url", "<no-url>")
 
-                if tag:
-                    last = db.get_version()
-
-                    if tag != last:
-                        logger.info("New Copycord release detected: %s (%s)", tag, url)
-                        if last and tag == self.CURRENT_VERSION:
-                            db.set_version(tag)
-
-                else:
+                if not tag:
                     logger.debug("GitHub response missing tag_name field: %r", release)
+                    await asyncio.sleep(self._release_interval)
+                    continue
+
+                last = db.get_version()
+
+                if tag != last:
+                    logger.info("New Copycord release detected: %s (%s)", tag, url)
+
+                    guild = receiver.bot.get_guild(guild_id)
+                    if guild:
+                        try:
+                            owner = guild.owner or await guild.fetch_member(guild.owner_id)
+                            await owner.send(
+                                f"A new Copycord release is available: `{tag}`\n{url}"
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to DM guild owner: %s", e)
+
+                    if last and tag == self.CURRENT_VERSION:
+                        db.set_version(tag)
 
             except Exception:
-                logger.debug("Error in release watcher loop")
-
-            logger.debug("Sleeping for %ds before next poll", self._release_interval)
+                logger.exception("Error in release watcher loop")
+                
             await asyncio.sleep(self._release_interval)
