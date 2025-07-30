@@ -640,7 +640,7 @@ class ServerReceiver:
             if renamed_threads:
                 parts.append(f"Renamed {renamed_threads} threads")
             if not parts:
-                parts.append("No changes detected")
+                parts.append("No changes needed")
 
         # Flush regular-message buffer
         for source_id, msgs in list(self._pending_msgs.items()):
@@ -826,6 +826,10 @@ class ServerReceiver:
                 if c:
                     if self.config.DELETE_CHANNELS:
                         await c.delete()
+                        logger.info(
+                            "Deleted category %s",
+                            c.name,
+                        )
                 self.db.delete_category_mapping(row["original_category_id"])
                 removed += 1
                 await self._cooldown()
@@ -846,16 +850,14 @@ class ServerReceiver:
                     if self.config.DELETE_CHANNELS:
                         await ch.delete()
                         logger.info(
-                            "Deleted cloned channel '%s' (ID %d) for original channel %d",
+                            "Deleted channel %s #%d",
                             ch.name,
                             ch.id,
-                            orig_id,
                         )
                 else:
                     logger.info(
-                        "Cloned channel ID %d not found; removing mapping for original channel %d",
+                        "Cloned channel #%d not found; removing mapping",
                         clone_id,
-                        orig_id,
                     )
 
                 self.db.delete_channel_mapping(orig_id)
@@ -879,6 +881,10 @@ class ServerReceiver:
                 if clone_cat and clone_cat.name != new_name:
                     old = clone_cat.name
                     await clone_cat.edit(name=new_name)
+                    logger.info(
+                        "Renamed category %s → %s",
+                        old, new_name
+                    )
                     self.db.upsert_category_mapping(
                         orig_id, new_name, row["cloned_category_id"], new_name
                     )
@@ -989,7 +995,7 @@ class ServerReceiver:
         old_map: Dict[int, Optional[int]],
     ) -> int:
         """
-        Re‑parent cloned channels whenever the expected parent (from DB) doesn't
+        Re-parent cloned channels whenever the expected parent (from DB) doesn't
         match what’s actually on Discord.
         """
         moved = 0
@@ -1009,50 +1015,52 @@ class ServerReceiver:
                 continue
 
             actual_clone = ch.category.id if ch.category else None
-
             if actual_clone == expected_clone:
                 continue
 
             if expected_clone is None:
-                await ch.edit(category=None)
-                logger.info("Reparented clone ID %d → standalone", clone_id)
-                moved += 1
-                await self._cooldown()
+                if actual_clone is not None:
+                    await ch.edit(category=None)
+                    logger.info("Reparented channel #%d → standalone", clone_id)
+                    moved += 1
+                    await self._cooldown()
                 continue
 
             cat_clone = guild.get_channel(expected_clone)
             if not isinstance(cat_clone, discord.CategoryChannel):
                 logger.warning(
-                    "Target category ID %d not found; leaving channel %d standalone",
+                    "Target category ID %d not found; leaving channel #%d standalone",
                     expected_clone,
                     clone_id,
                 )
-                await ch.edit(category=None)
-                moved += 1
-                await self._cooldown()
+                if actual_clone is not None:
+                    await ch.edit(category=None)
+                    await self._cooldown()
                 continue
 
             if not self._can_create_in_category(guild, cat_clone):
                 logger.warning(
-                    "Category '%s' (ID %d) full; leaving channel %d standalone",
+                    "Category %s full; leaving channel #%d standalone",
                     cat_clone.name,
-                    cat_clone.id,
                     clone_id,
                 )
-                await ch.edit(category=None)
-            else:
-                await ch.edit(category=cat_clone)
-                logger.info(
-                    "Reparented clone ID %d → category '%s' (ID %d)",
-                    clone_id,
-                    cat_clone.name,
-                    cat_clone.id,
-                )
+                if actual_clone is not None:
+                    await ch.edit(category=None)
+                    await self._cooldown()
+                continue
 
+            await ch.edit(category=cat_clone)
+            logger.info(
+                "Reparented channel #%d → category %s (ID %d)",
+                clone_id,
+                cat_clone.name,
+                cat_clone.id,
+            )
             moved += 1
             await self._cooldown()
 
         return moved
+
 
     async def _recreate_webhook(self, original_id: int) -> Optional[str]:
         """
