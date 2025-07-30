@@ -358,12 +358,23 @@ class ClientListener:
             return
         self.schedule_sync()
 
-    async def on_guild_channel_update(
-        self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
-    ):
+    async def on_guild_channel_update(self, before, after):
         if before.guild.id != self.host_guild_id:
             return
-        self.schedule_sync()
+
+        # Only resync if name or parent category changed
+        name_changed   = before.name != after.name
+        parent_before = getattr(before, "category_id", None)
+        parent_after  = getattr(after,  "category_id", None)
+        parent_changed = parent_before != parent_after
+
+        if name_changed or parent_changed:
+            self.schedule_sync()
+        else:
+            logger.debug(
+                "Ignored channel update for %s: non-structural change",
+                before.id
+            )
 
     async def _shutdown(self):
         logger.info("Shutting down client…")
