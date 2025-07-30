@@ -99,6 +99,7 @@ class ServerReceiver:
         self.bot.load_extension("commands.commands")
 
     async def on_ready(self):
+        self.config.setup_release_watcher(self)
         self.session = aiohttp.ClientSession()
         # Ensure we're in the clone guild
         clone_guild = self.bot.get_guild(self.clone_guild_id)
@@ -1548,6 +1549,7 @@ class ServerReceiver:
         logger.info("Shutdown complete.")
 
     def run(self):
+        logger.info("Starting Copycord %s", self.config.CURRENT_VERSION)
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.bot.close()))

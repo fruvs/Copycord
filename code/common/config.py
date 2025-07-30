@@ -1,41 +1,53 @@
+import asyncio
 import os
 import sys
 import logging
+import aiohttp
+from common.db import DBManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("config")
+
 
 class Config:
     def __init__(self):
+        self.CURRENT_VERSION = "v1.1.0"
+        self.GITHUB_API_LATEST = (
+            "https://api.github.com/repos/Copycord/Copycord/releases/latest"
+        )
+        self._release_interval = 3600
         # ─── Server-side settings ─────────────────────────────────
-        self.SERVER_TOKEN    = os.getenv("SERVER_TOKEN")
-        self.CLONE_GUILD_ID  = os.getenv("CLONE_GUILD_ID", "0")
-        self.DB_PATH         = os.getenv("DB_PATH", "/data/data.db")
-        self.SERVER_WS_HOST  = os.getenv("SERVER_WS_HOST", "server")
-        self.SERVER_WS_PORT  = int(os.getenv("SERVER_WS_PORT", "8765"))
-        self.SERVER_WS_URL   = os.getenv(
-            "WS_SERVER_URL",
-            f"ws://{self.SERVER_WS_HOST}:{self.SERVER_WS_PORT}"
+        self.SERVER_TOKEN = os.getenv("SERVER_TOKEN")
+        self.CLONE_GUILD_ID = os.getenv("CLONE_GUILD_ID", "0")
+        self.DB_PATH = os.getenv("DB_PATH", "/data/data.db")
+        self.db = DBManager(self.DB_PATH)
+        self.SERVER_WS_HOST = os.getenv("SERVER_WS_HOST", "server")
+        self.SERVER_WS_PORT = int(os.getenv("SERVER_WS_PORT", "8765"))
+        self.SERVER_WS_URL = os.getenv(
+            "WS_SERVER_URL", f"ws://{self.SERVER_WS_HOST}:{self.SERVER_WS_PORT}"
         )
-        self.DELETE_CHANNELS = os.getenv("DELETE_CHANNELS", "false")\
-            .lower() in ("1", "true", "yes")
-        self.DELETE_THREADS  = os.getenv("DELETE_THREADS",  "false")\
-            .lower() in ("1", "true", "yes")
-            
+        self.DELETE_CHANNELS = os.getenv("DELETE_CHANNELS", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self.DELETE_THREADS = os.getenv("DELETE_THREADS", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
         raw = os.getenv("COMMAND_USERS", "")
-        self.COMMAND_USERS    = [int(u) for u in raw.split(",") if u.strip()]
-        
+        self.COMMAND_USERS = [int(u) for u in raw.split(",") if u.strip()]
+
         # ─── Client-side settings ─────────────────────────────────
-        self.CLIENT_TOKEN    = os.getenv("CLIENT_TOKEN")
-        self.HOST_GUILD_ID   = os.getenv("HOST_GUILD_ID", "0")
-        self.CLIENT_WS_HOST  = os.getenv("CLIENT_WS_HOST", "client")
-        self.CLIENT_WS_PORT  = int(os.getenv("CLIENT_WS_PORT", "8766"))
-        self.CLIENT_WS_URL   = os.getenv(
-            "WS_CLIENT_URL",
-            f"ws://{self.CLIENT_WS_HOST}:{self.CLIENT_WS_PORT}"
+        self.CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
+        self.HOST_GUILD_ID = os.getenv("HOST_GUILD_ID", "0")
+        self.CLIENT_WS_HOST = os.getenv("CLIENT_WS_HOST", "client")
+        self.CLIENT_WS_PORT = int(os.getenv("CLIENT_WS_PORT", "8766"))
+        self.CLIENT_WS_URL = os.getenv(
+            "WS_CLIENT_URL", f"ws://{self.CLIENT_WS_HOST}:{self.CLIENT_WS_PORT}"
         )
-        self.SYNC_INTERVAL_SECONDS = int(
-            os.getenv("SYNC_INTERVAL_SECONDS", "3600")
-        )
+        self.SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", "3600"))
 
         # ─── VALIDATION ─────────────────────────────────────────────────
         for name in ("SERVER_TOKEN", "CLIENT_TOKEN"):
@@ -51,7 +63,9 @@ class Config:
             try:
                 val = int(raw)
             except (TypeError, ValueError):
-                logger.error(f"Discord guild ID {name} must be an integer (got {raw!r}); aborting.")
+                logger.error(
+                    f"Discord guild ID {name} must be an integer (got {raw!r}); aborting."
+                )
                 sys.exit(1)
             if val <= 0:
                 logger.error(
@@ -59,3 +73,48 @@ class Config:
                 )
                 sys.exit(1)
             setattr(self, name, val)
+
+    def setup_release_watcher(self, receiver):
+        """Start the release watcher background task"""
+        logger.info("Scheduling release watcher task")
+        asyncio.get_event_loop().create_task(self._release_watcher_loop(receiver))
+
+    async def _release_watcher_loop(self, receiver):
+        """Poll GitHub every hour and log when a new tag appears."""
+        await receiver.bot.wait_until_ready()
+        db = receiver.db
+
+        while not receiver.bot.is_closed():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(self.GITHUB_API_LATEST) as resp:
+                        if resp.status != 200:
+                            text = await resp.text()
+                            logger.debug(
+                                "GitHub API returned %d, skipping: %s",
+                                resp.status,
+                                text,
+                            )
+                            await asyncio.sleep(self._release_interval)
+                            continue
+                        release = await resp.json()
+
+                tag = release.get("tag_name")
+                url = release.get("html_url", "<no-url>")
+
+                if tag:
+                    last = db.get_version()
+
+                    if tag != last:
+                        logger.info("New Copycord release detected: %s (%s)", tag, url)
+                        if last and tag == self.CURRENT_VERSION:
+                            db.set_version(tag)
+
+                else:
+                    logger.debug("GitHub response missing tag_name field: %r", release)
+
+            except Exception:
+                logger.debug("Error in release watcher loop")
+
+            logger.debug("Sleeping for %ds before next poll", self._release_interval)
+            await asyncio.sleep(self._release_interval)
