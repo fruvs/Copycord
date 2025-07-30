@@ -42,6 +42,7 @@ docker compose version
 ---
 
 ## Step 4: Start Copycord
+In your terminal, navigate to the Copycord directory you created:
 
 ```
 docker compose up -d
