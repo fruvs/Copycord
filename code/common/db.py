@@ -51,18 +51,29 @@ class DBManager:
             )
             """
         )
-        c.execute(
-            """
+        c.execute("""
             CREATE TABLE IF NOT EXISTS settings  (
                 id              INTEGER PRIMARY KEY CHECK (id = 1),
                 blocked_keywords TEXT    NOT NULL DEFAULT ''
             );
-            """
-        )
+        """)
+        cols = [r[1] for r in c.execute(
+            "PRAGMA table_info(settings)"
+        ).fetchall()]
+        if "version" not in cols:
+            c.execute("ALTER TABLE settings ADD COLUMN version TEXT NOT NULL DEFAULT ''")
         
         c.execute(
             "INSERT OR IGNORE INTO settings (id, blocked_keywords) VALUES (1, '')"
         )
+        self.conn.commit()
+        
+    def get_version(self) -> str:
+        row = self.conn.execute("SELECT version FROM settings WHERE id = 1").fetchone()
+        return row[0] if row else ""
+
+    def set_version(self, version: str):
+        self.conn.execute("UPDATE settings SET version = ? WHERE id = 1", (version,))
         self.conn.commit()
 
     def get_all_category_mappings(self) -> List[sqlite3.Row]:

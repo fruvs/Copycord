@@ -52,7 +52,7 @@ class ClientListener:
     def __init__(self):
         self.config = Config()
         self.db = DBManager(self.config.DB_PATH)
-        self.host_guild_id= int(self.config.HOST_GUILD_ID)
+        self.host_guild_id = int(self.config.HOST_GUILD_ID)
         self.blocked_keywords = self.db.get_blocked_keywords()
         self.start_time = datetime.now(timezone.utc)
         self.bot = commands.Bot(command_prefix="!", self_bot=True)
@@ -82,14 +82,14 @@ class ClientListener:
         """
         msg is the JSON‐decoded dict sent by the server.
         """
-        typ  = msg.get("type")
+        typ = msg.get("type")
         data = msg.get("data", {})
 
         if typ == "settings_update":
             self.blocked_keywords = data.get("blocked_keywords", [])
             logger.info(
                 "Blocked keywords refreshed: %s",
-                ", ".join(self.blocked_keywords) or "<none>"
+                ", ".join(self.blocked_keywords) or "<none>",
             )
             return None
 
@@ -103,10 +103,10 @@ class ClientListener:
 
             return {
                 "data": {
-                    "client_timestamp":      now_ts,
-                    "discord_ws_latency_s":  ws_latency,
-                    "round_trip_seconds":    round_trip,
-                    "client_start_time":     self.start_time.isoformat(),
+                    "client_timestamp": now_ts,
+                    "discord_ws_latency_s": ws_latency,
+                    "round_trip_seconds": round_trip,
+                    "client_start_time": self.start_time.isoformat(),
                 },
             }
 
@@ -212,7 +212,7 @@ class ClientListener:
             self._sync_task = asyncio.create_task(self.periodic_sync_loop())
         if self._ws_task is None:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
-            
+
     def extract_public_message_attrs(self, message: discord.Message) -> dict:
         """
         Return a dict of all public, non‑callable attributes on a discord.Message.
@@ -244,14 +244,15 @@ class ClientListener:
         # Ignore DMs or wrong guild
         if message.guild is None or message.guild.id != self.host_guild_id:
             return True
-        
+
         # Ignore blocked keywords
         content = message.content.lower()
         for kw in self.blocked_keywords:
             if kw in content:
                 logger.info(
                     "[BLOCKED] Dropping message %s: contains blocked keyword %r",
-                    message.id, kw
+                    message.id,
+                    kw,
                 )
                 return True
 
@@ -260,7 +261,7 @@ class ClientListener:
     async def on_message(self, message: discord.Message):
         if self.should_ignore(message):
             return
-        
+
         # Normalize content and detect system messages
         raw = message.content or ""
         system = getattr(message, "system_content", "") or ""
@@ -317,13 +318,13 @@ class ClientListener:
             "Forwarded msg from %s",
             message.author.name,
         )
-        
+
         # Pull message attributes for debugging
         msg_attrs = self.extract_public_message_attrs(message)
 
         logger.debug(
             "Full Message attributes:\n%s",
-            pprint.pformat(msg_attrs, indent=2, width=120)
+            pprint.pformat(msg_attrs, indent=2, width=120),
         )
 
     async def on_thread_delete(self, thread: discord.Thread):
@@ -363,17 +364,16 @@ class ClientListener:
             return
 
         # Only resync if name or parent category changed
-        name_changed   = before.name != after.name
+        name_changed = before.name != after.name
         parent_before = getattr(before, "category_id", None)
-        parent_after  = getattr(after,  "category_id", None)
+        parent_after = getattr(after, "category_id", None)
         parent_changed = parent_before != parent_after
 
         if name_changed or parent_changed:
             self.schedule_sync()
         else:
             logger.debug(
-                "Ignored channel update for %s: non-structural change",
-                before.id
+                "Ignored channel update for %s: non-structural change", before.id
             )
 
     async def _shutdown(self):
@@ -389,6 +389,7 @@ class ClientListener:
         logger.info("Client shutdown complete.")
 
     def run(self):
+        logger.info("Starting Copycord %s", self.config.CURRENT_VERSION)
         loop = asyncio.get_event_loop()
         try:
             loop.run_until_complete(self.bot.start(self.config.CLIENT_TOKEN))
