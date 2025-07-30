@@ -1,7 +1,7 @@
 # commands/commands.py
 import discord
 from discord.ext import commands
-from discord import Option
+from discord import CategoryChannel, Option
 from discord import errors as discord_errors
 from datetime import datetime, timezone
 import time
@@ -169,6 +169,100 @@ class CloneCommands(commands.Cog):
         else:
             formatted = "\n".join(f"• `{kw}`" for kw in kws)
             await ctx.respond(f"📋 **Blocked keywords:**\n{formatted}", ephemeral=True)
+            
+    @commands.slash_command(
+        name="verify_structure",
+        description="Report any channels or categories not in the last sitemap. Optionally delete them.",
+        guild_ids=[GUILD_ID],
+    )
+    async def verify_structure(
+        self,
+        ctx: discord.ApplicationContext,
+        delete: bool = Option(
+            bool,
+            "If true, delete orphaned channels/categories after reporting",
+            default=False
+        ),
+    ):
+        """Lists—and optionally deletes—categories and channels that aren’t in the last synced sitemap."""
+        await ctx.defer(ephemeral=True)
+
+        guild = ctx.guild
+
+        mapped_cats = {
+            r["cloned_category_id"]
+            for r in self.db.get_all_category_mappings()
+            if r["cloned_category_id"] is not None
+        }
+        mapped_chs = {
+            r["cloned_channel_id"]
+            for r in self.db.get_all_channel_mappings()
+            if r["cloned_channel_id"] is not None
+        }
+
+        orphan_categories = [c for c in guild.categories if c.id not in mapped_cats]
+        orphan_channels = [
+            ch for ch in guild.channels
+            if not isinstance(ch, CategoryChannel) and ch.id not in mapped_chs
+        ]
+        logger.info(
+            "Found %d orphan categories and %d orphan channels",
+            len(orphan_categories), len(orphan_channels)
+        )
+
+        if delete:
+            deleted_cats = deleted_chs = 0
+
+            for cat in orphan_categories:
+                try:
+                    await cat.delete()
+                    deleted_cats += 1
+                    logger.info("Deleted orphan category %s (ID %d)", cat.name, cat.id)
+                except Exception as e:
+                    logger.warning("Failed to delete category %s: %s", cat.id, e)
+
+            for ch in orphan_channels:
+                try:
+                    await ch.delete()
+                    deleted_chs += 1
+                    logger.info("Deleted orphan channel %s (ID %d)", ch.name, ch.id)
+                except Exception as e:
+                    logger.warning("Failed to delete channel %s: %s", ch.id, e)
+
+            if deleted_cats == 0 and deleted_chs == 0:
+                msg = "No orphaned channels or categories found to delete."
+            else:
+                parts = []
+                if deleted_cats:
+                    parts.append(f"{deleted_cats} categor{'y' if deleted_cats==1 else 'ies'}")
+                if deleted_chs:
+                    parts.append(f"{deleted_chs} channel{'s' if deleted_chs!=1 else ''}")
+                msg = "Deleted " + " and ".join(parts) + "."
+                logger.info("Deletion summary: %s", msg)
+
+            return await ctx.followup.send(msg, ephemeral=True)
+
+        # Otherwise, normal report flow
+        if not orphan_categories and not orphan_channels:
+            msg = "All channels and categories match the last sitemap."
+            logger.info(msg)
+            return await ctx.followup.send(msg, ephemeral=True)
+
+        report_lines = []
+        if orphan_categories:
+            report_lines.append(f"**Orphan Categories ({len(orphan_categories)})**:")
+            report_lines += [f"- {cat.name} (ID {cat.id})" for cat in orphan_categories]
+
+        if orphan_channels:
+            report_lines.append(f"**Orphan Channels ({len(orphan_channels)})**:")
+            report_lines += [f"- <#{ch.id}> ({ch.name})" for ch in orphan_channels]
+
+        report = "\n".join(report_lines)
+        if len(report) > 1900:
+            report = report[:1900] + "\n…(truncated)"
+
+        await ctx.followup.send(report, ephemeral=True)
+
 
         
 def setup(bot: commands.Bot):
