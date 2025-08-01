@@ -1424,11 +1424,14 @@ class ServerReceiver:
                 )
 
                 if thread_map is None:
-                    created = True
-                    # First coroutine will create the thread
+                    cloned_chan = guild.get_channel(forum_map["cloned_channel_id"])
+                    chan_name = cloned_chan.name if cloned_chan else "<unknown>"
+
                     logger.info(
-                        "Creating thread '%s' in forum %s by %s",
-                        data["thread_name"], cloned_forum.id, data["author"]
+                        "Creating thread '%s' in channel #%s by %s",
+                        data["thread_name"],
+                        chan_name,
+                        data["author"],
                     )
 
                     if isinstance(cloned_forum, discord.ForumChannel):
