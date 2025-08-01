@@ -1383,7 +1383,7 @@ class ServerReceiver:
         )
         if not forum_map:
             logger.info(
-                "No forum mapping for '%s'; buffering until mapping exists",
+                "No forum mapping for '%s'; buffering until synced",
                 data.get("thread_name"),
             )
             self._pending_thread_msgs.append(data)
