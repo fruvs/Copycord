@@ -1444,6 +1444,7 @@ class ServerReceiver:
                         ) as resp:
                             resp.raise_for_status()
                             new_id = int((await resp.json())["channel_id"])
+                            created = True
                     else:
                         # Direct thread creation on a TextChannel
                         new_thread = await cloned_forum.create_thread(
@@ -1454,6 +1455,8 @@ class ServerReceiver:
                         new_id = new_thread.id
                         # send the initial post
                         await forum_webhook.send(**payload, thread=new_thread, wait=True)
+                        created = True
+                        
 
                     # enforce forum thread limit
                     try:
