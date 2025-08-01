@@ -782,6 +782,7 @@ class ServerReceiver:
                     deleted_threads += 1
 
             renamed_threads = 0
+            removed_thread_mappings = 0
             for src in sitemap.get("threads", []):
                 orig_tid = src["id"]
                 new_name = src["name"]
@@ -797,9 +798,7 @@ class ServerReceiver:
                     continue
 
                 clone_tid = mapping["cloned_thread_id"]
-
                 ch = guild.get_channel(clone_tid)
-                removed_thread_mappings = 0
                 if not ch:
                     try:
                         ch = await self.bot.fetch_channel(clone_tid)
