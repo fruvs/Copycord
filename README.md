@@ -78,7 +78,7 @@ In the new folder, create `docker-compose.yml` and `.env`:
 services:
   server:
     container_name: copycord-server
-    image: ghcr.io/copycord/copycord-server:v1.3.3
+    image: ghcr.io/copycord/copycord-server:v1.4.0
     env_file:
       - .env
     volumes:
@@ -87,7 +87,7 @@ services:
 
   client:
     container_name: copycord-client
-    image: ghcr.io/copycord/copycord-client:v1.3.3
+    image: ghcr.io/copycord/copycord-client:v1.4.0
     env_file:
       - .env
     volumes:
