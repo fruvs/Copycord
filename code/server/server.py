@@ -5,6 +5,7 @@ from logging.handlers import RotatingFileHandler
 from typing import List, Optional, Tuple, Dict, Union
 import aiohttp
 import discord
+from urllib.parse import quote_plus
 import re
 from discord import (
     ForumChannel,
@@ -26,6 +27,7 @@ from asyncio import Queue
 from common.config import Config
 from common.websockets import WebsocketManager
 from common.db import DBManager
+from common.rate_limiter import RateLimitManager, ActionType
 
 LOG_DIR = "/data"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -49,6 +51,7 @@ fh = RotatingFileHandler(
     backupCount=1,
     encoding="utf-8",
 )
+fh.setLevel(logging.INFO)
 fh.setFormatter(formatter)
 root.addHandler(fh)
 
@@ -91,6 +94,7 @@ class ServerReceiver:
         self._pending_msgs: dict[int, list[dict]] = {}
         self._pending_thread_msgs: List[Dict] = []
         orig_on_connect = self.bot.on_connect
+        self.ratelimit = RateLimitManager()
         # Discord guild/channel limits
         self.MAX_GUILD_CHANNELS = 500
         self.MAX_CATEGORIES = 50
@@ -153,7 +157,7 @@ class ServerReceiver:
             asyncio.create_task(self.forward_message(data))
 
         elif typ == "thread_message":
-            asyncio.create_task(self.handle_forum_message(data))
+            asyncio.create_task(self.handle_thread_message(data))
 
         elif typ == "thread_delete":
             asyncio.create_task(self.handle_thread_delete(data))
@@ -230,6 +234,7 @@ class ServerReceiver:
             cloned = discord.utils.get(guild.emojis, id=row["cloned_emoji_id"])
             if cloned:
                 try:
+                    await self.ratelimit.acquire(ActionType.EMOJI)
                     await cloned.delete()
                     deleted += 1
                     logger.info(f"Deleted emoji {row['cloned_emoji_name']}")
@@ -238,7 +243,6 @@ class ServerReceiver:
                 except discord.HTTPException as e:
                     logger.error(f"Error deleting emoji {cloned.name}: {e}")
             self.db.delete_emoji_mapping(orig_id)
-            await self._cooldown()
 
         # 2) Process all incoming (create / rename / repair)
         for orig_id, info in incoming.items():
@@ -261,18 +265,19 @@ class ServerReceiver:
             # 2b) Repair manual rename in clone
             if mapping and cloned.name != name:
                 try:
+                    await self.ratelimit.acquire(ActionType.EMOJI)
                     await cloned.edit(name=name)
                     renamed += 1
                     logger.info(f"Restored emoji {cloned.name} → {name}")
                     self.db.upsert_emoji_mapping(orig_id, name, cloned.id, name)
                 except discord.HTTPException as e:
                     logger.error(f"Failed restoring emoji {cloned.name}: {e}")
-                await self._cooldown()
                 continue
 
             # 2c) Upstream rename
             if mapping and mapping["original_emoji_name"] != name:
                 try:
+                    await self.ratelimit.acquire(ActionType.EMOJI)
                     await cloned.edit(name=name)
                     renamed += 1
                     logger.info(
@@ -281,7 +286,6 @@ class ServerReceiver:
                     self.db.upsert_emoji_mapping(orig_id, name, cloned.id, cloned.name)
                 except discord.HTTPException as e:
                     logger.error(f"Failed renaming emoji {cloned.name}: {e}")
-                await self._cooldown()
                 continue
 
             # skip up‐to‐date
@@ -315,6 +319,7 @@ class ServerReceiver:
 
             # create emoji
             try:
+                await self.ratelimit.acquire(ActionType.EMOJI)
                 created_emo = await guild.create_custom_emoji(name=name, image=raw)
                 created += 1
                 logger.info(f"Created emoji {name}")
@@ -330,8 +335,6 @@ class ServerReceiver:
                     size_failed += 1
                 else:
                     logger.error(f"Failed creating {name}: {e}")
-
-            await self._cooldown()
 
         # summary
         if skipped_limit_static or skipped_limit_animated:
@@ -402,12 +405,6 @@ class ServerReceiver:
         result = out.getvalue()
         return result if len(result) <= max_bytes else data
 
-    async def _cooldown(self):
-        """Sleep for the current backoff delay, then double it (max 10s)."""
-        delay = self._backoff_delay
-        logger.debug(f"Backing off for {delay}s before next action")
-        await asyncio.sleep(delay)
-        self._backoff_delay = min(self._backoff_delay * 2, 10)
 
     async def sync_structure(self, task_id: int, sitemap: Dict) -> str:
         logging.debug(f"Received sitemap {sitemap}")
@@ -443,6 +440,7 @@ class ServerReceiver:
 
             if not want_comm and supports_comm:
                 try:
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await guild.edit(community=False)
                     logger.info("Disabled Community mode on clone guild %s", guild.id)
                 except Forbidden as e:
@@ -513,6 +511,7 @@ class ServerReceiver:
 
                         if need_enable or need_update:
                             try:
+                                await self.ratelimit.acquire(ActionType.EDIT)
                                 await guild.edit(
                                     community=True,
                                     rules_channel=rules_chan,
@@ -567,9 +566,10 @@ class ServerReceiver:
                     clone_chan = guild.get_channel(mapping["cloned_channel_id"])
                     if clone_chan and clone_chan.name != item["name"]:
                         old = clone_chan.name
+                        await self.ratelimit.acquire(ActionType.EDIT)
                         await clone_chan.edit(name=item["name"])
                         logger.info(
-                            "Renamed community channel '%s' → '%s' (ID %d)",
+                            "Renamed channel '%s' → '%s' (ID %d)",
                             old,
                             item["name"],
                             clone_chan.id,
@@ -582,7 +582,6 @@ class ServerReceiver:
                             mapping["original_parent_category_id"],
                             mapping["cloned_parent_category_id"],
                         )
-                        await self._cooldown()
 
             removed_chan = await self._handle_removed_channels(
                 guild, self._parse_sitemap(sitemap)
@@ -630,8 +629,10 @@ class ServerReceiver:
                                 ch.id,
                                 clone_cat.name,
                             )
+                            await self.ratelimit.acquire(ActionType.EDIT)
                             await ch.edit(category=None)
                         else:
+                            await self.ratelimit.acquire(ActionType.EDIT)
                             await ch.edit(category=clone_cat)
                             logger.info(
                                 "Reparented channel ID %d → category '%s' (ID %d)",
@@ -648,8 +649,6 @@ class ServerReceiver:
                             row["original_parent_category_id"],
                             clone_cat.id,
                         )
-                        await self._cooldown()
-
             created_forums = 0
             for forum in sitemap.get("forums", []):
                 orig_forum_id = forum["id"]
@@ -696,7 +695,6 @@ class ServerReceiver:
                     forum["category_id"],
                     parent.id if parent else None,
                 )
-                await self._cooldown()
                 if not existed:
                     new_url = await self._recreate_webhook(orig_forum_id)
                     if not new_url:
@@ -736,6 +734,7 @@ class ServerReceiver:
                 ch = guild.get_channel(clone_id)
                 if ch and ch.name != item["name"]:
                     old = ch.name
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await ch.edit(name=item["name"])
                     renamed_chan += 1
                     logger.info(
@@ -744,7 +743,6 @@ class ServerReceiver:
                         item["name"],
                         clone_id,
                     )
-                    await self._cooldown()
 
             moved_master = await self._handle_master_channel_moves(
                 guild, incoming, old_map
@@ -771,6 +769,7 @@ class ServerReceiver:
                             if ch:
                                 if self.config.DELETE_THREADS:
                                     try:
+                                        await self.ratelimit.acquire(ActionType.DELETE)
                                         await ch.delete()
                                         logger.info(
                                             "Deleted cloned thread %s for original %s",
@@ -819,6 +818,7 @@ class ServerReceiver:
 
                 if ch.name != new_name:
                     old = ch.name
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await ch.edit(name=new_name)
                     logger.info(
                         "Renamed cloned thread %s → %s",
@@ -832,8 +832,6 @@ class ServerReceiver:
                         mapping["cloned_thread_id"],
                     )
                     renamed_threads += 1
-                    await self._cooldown()
-
             # ─── EMOJI SYNC ────────────────────────────────────────
             if self.config.CLONE_EMOJI:
                 emoji_deleted, emoji_renamed, emoji_created = await self._sync_emojis(
@@ -878,14 +876,12 @@ class ServerReceiver:
         # Flush regular-message buffer
         for source_id, msgs in list(self._pending_msgs.items()):
             for msg in msgs:
-                await asyncio.sleep(0.5)
                 await self.forward_message(msg)
             self._pending_msgs.pop(source_id, None)
 
         # Flush thread-message buffer
         for data in list(self._pending_thread_msgs):
-            await asyncio.sleep(0.5)
-            await self.handle_forum_message(data)
+            await self.handle_thread_message(data)
         self._pending_thread_msgs.clear()
 
         return "; ".join(parts)
@@ -1024,9 +1020,10 @@ class ServerReceiver:
             category = None
 
         if kind == "forum":
+            await self.ratelimit.acquire(ActionType.CREATE)
             ch = await guild.create_forum_channel(name=name, category=category)
         else:
-
+            await self.ratelimit.acquire(ActionType.CREATE)
             ch = await guild.create_text_channel(name=name, category=category)
 
         logger.info("Created %s channel '%s' #%s", kind, name, ch.id)
@@ -1034,6 +1031,7 @@ class ServerReceiver:
         if kind == "news":
             if "NEWS" in guild.features:
                 try:
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await ch.edit(type=ChannelType.news)
                     logger.info("Converted '%s' #%d to Announcement", name, ch.id)
                 except HTTPException as e:
@@ -1058,6 +1056,7 @@ class ServerReceiver:
                 c = guild.get_channel(row["cloned_category_id"])
                 if c:
                     if self.config.DELETE_CHANNELS:
+                        await self.ratelimit.acquire(ActionType.DELETE)
                         await c.delete()
                         logger.info(
                             "Deleted category %s",
@@ -1065,7 +1064,6 @@ class ServerReceiver:
                         )
                 self.db.delete_category_mapping(row["original_category_id"])
                 removed += 1
-                await self._cooldown()
         return removed
 
     async def _handle_removed_channels(
@@ -1081,6 +1079,7 @@ class ServerReceiver:
                 ch = guild.get_channel(clone_id)
                 if ch:
                     if self.config.DELETE_CHANNELS:
+                        await self.ratelimit.acquire(ActionType.DELETE)
                         await ch.delete()
                         logger.info(
                             "Deleted channel %s #%d",
@@ -1095,8 +1094,6 @@ class ServerReceiver:
 
                 self.db.delete_channel_mapping(orig_id)
                 removed += 1
-                await self._cooldown()
-
         return removed
 
     async def _handle_renamed_categories(
@@ -1113,13 +1110,13 @@ class ServerReceiver:
                 clone_cat = guild.get_channel(row["cloned_category_id"])
                 if clone_cat and clone_cat.name != new_name:
                     old = clone_cat.name
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await clone_cat.edit(name=new_name)
                     logger.info("Renamed category %s → %s", old, new_name)
                     self.db.upsert_category_mapping(
                         orig_id, new_name, row["cloned_category_id"], new_name
                     )
                     renamed += 1
-                    await self._cooldown()
         return renamed
 
     async def _ensure_category(
@@ -1141,6 +1138,7 @@ class ServerReceiver:
                 self.MAX_CATEGORIES,
             )
             return None
+        await self.ratelimit.acquire(ActionType.CREATE)
         clone = await guild.create_category(original_name)
         logger.info(
             "Created category %s",
@@ -1149,7 +1147,6 @@ class ServerReceiver:
         self.db.upsert_category_mapping(
             original_id, original_name, clone.id, original_name
         )
-        await self._cooldown()
         return clone
 
     async def _ensure_channel_and_webhook(
@@ -1177,6 +1174,7 @@ class ServerReceiver:
                     if wh_url:
                         return original_id, clone_id, wh_url
                     # recreate missing webhook
+                    await self.ratelimit.acquire(ActionType.NEW_WEBHOOK)
                     wh = await ch.create_webhook(name="Copycord")
                     url = f"https://discord.com/api/webhooks/{wh.id}/{wh.token}"
                     self.db.upsert_channel_mapping(
@@ -1190,7 +1188,6 @@ class ServerReceiver:
                     logger.info(
                         "Re-created webhook for %s #%d", original_name, original_id
                     )
-                    await self._cooldown()
                     return original_id, clone_id, url
             break
 
@@ -1201,8 +1198,7 @@ class ServerReceiver:
         kind = "news" if channel_type == ChannelType.news.value else "text"
         ch = await self._create_channel(guild, kind, original_name, category)
 
-        await self._cooldown()
-
+        await self.ratelimit.acquire(ActionType.NEW_WEBHOOK)
         wh = await ch.create_webhook(name="Clonecord")
         url = f"https://discord.com/api/webhooks/{wh.id}/{wh.token}"
         logger.debug("Created webhook in %s", original_name)
@@ -1215,7 +1211,6 @@ class ServerReceiver:
             parent_id,
             category.id if category else None,
         )
-        await self._cooldown()
         return original_id, ch.id, url
 
     async def _handle_master_channel_moves(
@@ -1250,10 +1245,10 @@ class ServerReceiver:
 
             if expected_clone is None:
                 if actual_clone is not None:
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await ch.edit(category=None)
                     logger.info("Reparented channel #%d → standalone", clone_id)
                     moved += 1
-                    await self._cooldown()
                 continue
 
             cat_clone = guild.get_channel(expected_clone)
@@ -1264,8 +1259,8 @@ class ServerReceiver:
                     clone_id,
                 )
                 if actual_clone is not None:
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await ch.edit(category=None)
-                    await self._cooldown()
                 continue
 
             if not self._can_create_in_category(guild, cat_clone):
@@ -1275,10 +1270,10 @@ class ServerReceiver:
                     clone_id,
                 )
                 if actual_clone is not None:
+                    await self.ratelimit.acquire(ActionType.EDIT)
                     await ch.edit(category=None)
-                    await self._cooldown()
                 continue
-
+            await self.ratelimit.acquire(ActionType.EDIT)
             await ch.edit(category=cat_clone)
             logger.info(
                 "Reparented channel #%d → category %s (ID %d)",
@@ -1287,7 +1282,6 @@ class ServerReceiver:
                 cat_clone.id,
             )
             moved += 1
-            await self._cooldown()
 
         return moved
 
@@ -1313,7 +1307,7 @@ class ServerReceiver:
 
         cloned_id = row["cloned_channel_id"]
         if not cloned_id:
-            logger.error(
+            logger.debug(
                 "No mapping found for #%s; cannot recreate webhook",
                 original_id,
             )
@@ -1330,7 +1324,7 @@ class ServerReceiver:
 
         ch = guild.get_channel(cloned_id)
         if not ch:
-            logger.error(
+            logger.debug(
                 "Clone channel %s not found in guild %s; cannot recreate webhook for #%s",
                 cloned_id,
                 self.clone_guild_id,
@@ -1339,6 +1333,7 @@ class ServerReceiver:
             return None
 
         try:
+            await self.ratelimit.acquire(ActionType.NEW_WEBHOOK)
             wh = await ch.create_webhook(name="Clonecord")
             url = f"https://discord.com/api/webhooks/{wh.id}/{wh.token}"
 
@@ -1352,152 +1347,169 @@ class ServerReceiver:
             )
 
             logger.debug("Recreated webhook for #%s", original_id)
-            await self._cooldown()
             return url
 
         except Exception:
             logger.exception("Failed to recreate webhook for #%s", original_id)
             return None
 
-    async def handle_forum_message(self, data: dict):
+    async def handle_thread_message(self, data: dict):
         """
-        Handle an incoming forum-thread message: buffer if unmapped, create or forward to thread.
+        Handle an incoming thread message in either a forum or text channel:
         """
-        # 1) Buffer all messages during sync
-        if self._sync_lock.locked():
-            logger.info(
-                "Sync in progress; buffering thread message for '%s' from %s",
-                data.get("thread_name"),
-                data.get("author"),
-            )
-            self._pending_thread_msgs.append(data)
-            return
-
-        # 2) Ensure guild exists
+        # ensure clone guild
         guild = self.bot.get_guild(self.clone_guild_id)
         if not guild:
             logger.error("Clone guild %s not available", self.clone_guild_id)
             return
 
-        # 3) Load forum-channel mapping
-        forum_map = next(
-            (
-                r for r in self.db.get_all_channel_mappings()
-                if r["original_channel_id"] == data["forum_id"]
-            ),
-            None,
+        # parent channel mapping
+        chan_map = next(
+            (r for r in self.db.get_all_channel_mappings()
+            if r["original_channel_id"] == data["forum_id"]),
+            None
         )
-        if not forum_map:
-            logger.info(
-                "No forum mapping for '%s'; buffering until synced",
-                data.get("thread_name"),
+        if not chan_map:
+            logger.info("No mapping for #%s; adding to queue, waiting for next sync", data["channel_name"])
+            self._pending_thread_msgs.append(data)
+            return
+
+        cloned_parent = guild.get_channel(chan_map["cloned_channel_id"])
+        cloned_id = chan_map["cloned_channel_id"]
+        if cloned_id is None:
+            logger.warning(
+                "Channel %s not cloned yet; queueing message until it’s created",
+                data["channel_name"],
             )
             self._pending_thread_msgs.append(data)
             return
 
-        # 4) Check cloned forum channel
-        cloned_forum = guild.get_channel(forum_map["cloned_channel_id"])
-        if not cloned_forum:
+        cloned_parent = guild.get_channel(cloned_id)
+        if not cloned_parent:
             logger.info(
-                "Mapped forum channel %d not found; buffering until exists",
-                forum_map["cloned_channel_id"],
+                "Channel %s not cloned yet; queueing message until it’s created",
+                cloned_id,
             )
             self._pending_thread_msgs.append(data)
             return
 
-        # 5) Build payload and prepare webhook
+        # build payload
         payload = self._build_webhook_payload(data)
-        session = aiohttp.ClientSession()
+        if not payload or (not payload.get("content") and not payload.get("embeds")):
+            logger.info("Skipping empty payload for '%s'", data["thread_name"])
+            return
+
+        # prepare webhook & session
+        session        = aiohttp.ClientSession()
+        webhook_url    = chan_map["channel_webhook_url"]
+        thread_webhook = Webhook.from_url(webhook_url, session=session)
+
+        orig_tid = data["thread_id"]
+        lock     = self._thread_locks.setdefault(orig_tid, asyncio.Lock())
+        created  = False
+
         try:
-            # 6) Instantiate the forum webhook
-            forum_webhook = Webhook.from_url(
-                forum_map["channel_webhook_url"], session=session
-            )
-
-            # 7) Ensure only one creator per original thread
-            orig_tid = data["thread_id"]
-            lock = self._thread_locks.setdefault(orig_tid, asyncio.Lock())
-            created = False
-
             async with lock:
-                # re-fetch the thread mapping inside the lock
-                thread_map = next(
-                    (
-                        r for r in self.db.get_all_threads()
-                        if r["original_thread_id"] == orig_tid
-                    ),
-                    None,
+                # lookup existing thread mapping
+                thr_map = next(
+                    (r for r in self.db.get_all_threads()
+                    if r["original_thread_id"] == orig_tid),
+                    None
                 )
 
-                if thread_map is None:
-                    cloned_chan = guild.get_channel(forum_map["cloned_channel_id"])
-                    chan_name = cloned_chan.name if cloned_chan else "<unknown>"
+                clone_thread = None
 
-                    logger.info(
-                        "Creating thread '%s' in channel #%s by %s",
-                        data["thread_name"],
-                        chan_name,
-                        data["author"],
-                    )
+                # Helper to delete stale mapping
+                def drop_mapping():
+                    self.db.delete_forum_thread_mapping(orig_tid)
+                    return None
 
-                    if isinstance(cloned_forum, discord.ForumChannel):
-                        # Webhook-based creation (includes initial message)
-                        base = forum_map["channel_webhook_url"]
-                        sep  = "&" if "?" in base else "?"
-                        url  = f"{base}{sep}wait=true"
-                        async with session.post(
-                            url, json={**payload, "thread_name": data["thread_name"]}
-                        ) as resp:
-                            resp.raise_for_status()
-                            new_id = int((await resp.json())["channel_id"])
-                            created = True
-                    else:
-                        # Direct thread creation on a TextChannel
-                        new_thread = await cloned_forum.create_thread(
-                            name=data["thread_name"],
-                            type=discord.ChannelType.public_thread,
-                            auto_archive_duration=1440,
-                        )
-                        new_id = new_thread.id
-                        # send the initial post
-                        await forum_webhook.send(**payload, thread=new_thread, wait=True)
-                        created = True
-                        
-
-                    # enforce forum thread limit
+                # Attempt to fetch existing mapped thread
+                if thr_map:
                     try:
-                        await self._enforce_thread_limit(guild)
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to enforce thread limit on forum %s: %s",
-                            cloned_forum.id, e
+                        clone_thread = (
+                            guild.get_channel(thr_map["cloned_thread_id"])
+                            or await self.bot.fetch_channel(thr_map["cloned_thread_id"])
+                        )
+                    except HTTPException as e:
+                        if e.status == 404:
+                            drop_mapping()
+                            thr_map = None
+                            clone_thread = None
+                        else:
+                            logger.warning("Error fetching thread %s; adding to queue, waiting for next sync",
+                                        thr_map["cloned_thread_id"])
+                            self._pending_thread_msgs.append(data)
+                            return
+
+                # If no mapping (first use or after deletion), create new
+                if thr_map is None:
+                    logger.info("Creating thread '%s' in #%s by %s",
+                                data["thread_name"], cloned_parent.name, data["author"])
+                    await self.ratelimit.acquire(ActionType.THREAD)
+
+                    if isinstance(cloned_parent, ForumChannel):
+                        # forum: create + post in one step
+                        resp_msg = await thread_webhook.send(
+                            content     = payload.get("content"),
+                            embeds      = payload.get("embeds"),
+                            username    = payload.get("username"),
+                            avatar_url  = payload.get("avatar_url"),
+                            thread_name = data["thread_name"],
+                            wait        = True,
+                        )
+                        # locate via cache or fetch_active_threads
+                        clone_thread = next(
+                            (t for t in cloned_parent.threads
+                            if t.name == data["thread_name"]),
+                            None
+                        ) or (await cloned_parent.fetch_active_threads()).threads[0]
+                        new_id = clone_thread.id
+
+                    else:
+                        # text channel: create then initial post
+                        new_thread = await cloned_parent.create_thread(
+                            name                    = data["thread_name"],
+                            type                    = ChannelType.public_thread,
+                            auto_archive_duration   = 1440,
+                        )
+                        new_id       = new_thread.id
+                        clone_thread = new_thread
+                        # initial post
+                        await self.ratelimit.acquire(ActionType.WEBHOOK, key=webhook_url)
+                        await thread_webhook.send(
+                            content    = payload.get("content"),
+                            embeds     = payload.get("embeds"),
+                            username   = payload.get("username"),
+                            avatar_url = payload.get("avatar_url"),
+                            thread     = clone_thread,
+                            wait       = True,
                         )
 
-                    # persist the new mapping
+                    created = True
+                    # persist mapping
                     self.db.upsert_forum_thread_mapping(
-                        orig_tid,
-                        data["thread_name"],
-                        new_id,
-                        data["forum_id"],
-                        forum_map["cloned_channel_id"],
+                        orig_thread_id   = orig_tid,
+                        orig_thread_name = data["thread_name"],
+                        clone_thread_id  = new_id,
+                        forum_orig_id    = data["forum_id"],
+                        forum_clone_id   = chan_map["cloned_channel_id"],
                     )
-                else:
-                    # thread already created by another coroutine
-                    new_id = thread_map["cloned_thread_id"]
 
-                # fetch the actual Thread object
-                clone_thread = (
-                    guild.get_channel(new_id)
-                    or await self.bot.fetch_channel(new_id)
-                )
-
-            # 8) Outside the lock, forward message only if not initial create
+            # subsequent messages only
             if not created:
-                logger.info(
-                    "Forwarding message to existing thread '%s' from %s",
-                    data["thread_name"], data["author"]
+                logger.info("Forwarding message to thread '%s' from %s",
+                            data["thread_name"], data["author"])
+                await self.ratelimit.acquire(ActionType.WEBHOOK, key=webhook_url)
+                await thread_webhook.send(
+                    content    = payload.get("content"),
+                    embeds     = payload.get("embeds"),
+                    username   = payload.get("username"),
+                    avatar_url = payload.get("avatar_url"),
+                    thread     = clone_thread,
+                    wait       = True,
                 )
-                await forum_webhook.send(**payload, thread=clone_thread, wait=True)
+
         finally:
             await session.close()
 
@@ -1540,6 +1552,7 @@ class ServerReceiver:
             if ch:
                 if self.config.DELETE_THREADS:
                     try:
+                        await self.ratelimit.acquire(ActionType.DELETE)
                         await ch.delete()
                         logger.info(
                             "Deleted thread '%s' in #%s",
@@ -1589,6 +1602,7 @@ class ServerReceiver:
                 return
 
         try:
+            await self.ratelimit.acquire(ActionType.EDIT)
             await ch.edit(name=new_name)
             logger.info(f"Renamed cloned thread {cloned_id} → {new_name!r}")
         except Exception as e:
@@ -1635,6 +1649,7 @@ class ServerReceiver:
         # Archive them
         for thread in to_archive:
             try:
+                await self.ratelimit.acquire(ActionType.EDIT)
                 await thread.edit(archived=True)
                 parent = thread.parent
                 parent_name = parent.name if parent else "Unknown"
@@ -1722,16 +1737,18 @@ class ServerReceiver:
         }
 
         if len(text) > 2000:
-            logger.debug("Payload too long (%d chars), wrapping in embed", len(text))
             long_embed = Embed(description=text[:4096])
-            # turn *all* embeds into dicts
-            all_embeds = [long_embed] + embeds
-            return {**base, "embeds": [e.to_dict() for e in all_embeds]}
+            return {
+                **base,
+                "content": None,
+                "embeds": [long_embed] + embeds
+            }
 
-        payload = {**base, "content": text or None}
-        if embeds:
-            # convert all Embed instances to dicts
-            payload["embeds"] = [e.to_dict() for e in embeds]
+        payload = {
+            **base,
+            "content": text or None,
+            "embeds": embeds
+        }
         return payload
 
     async def forward_message(self, msg: Dict):
@@ -1739,51 +1756,46 @@ class ServerReceiver:
 
         # Lookup mapping
         mapping = next(
-            (
-                r
-                for r in self.db.get_all_channel_mappings()
-                if r["original_channel_id"] == source_id
-            ),
+            (r for r in self.db.get_all_channel_mappings()
+            if r["original_channel_id"] == source_id),
             None,
         )
         url = mapping["channel_webhook_url"] if mapping else None
 
         # Buffer if sync in progress or no mapping yet
         if mapping is None:
-            logger.info(
-                "No mapping yet for channel #%s; buffering message from %s until synced",
-                msg["channel_name"],
-                msg["author"],
-            )
-            self._pending_msgs.setdefault(source_id, []).append(msg)
+            if self._sync_lock.locked():
+                logger.info(
+                    "No mapping yet for channel #%s; msg from %s is queued and will be sent after sync",
+                    msg["channel_name"], msg["author"],
+                )
+                self._pending_msgs.setdefault(source_id, []).append(msg)
             return
 
-        # 2) We have a mapping but no webhook URL → either buffer (mid-sync) or recreate
+        # Recreate missing webhook if needed
         if not url:
             if self._sync_lock.locked():
                 logger.info(
-                    "Sync in progress; message in #%s from %s will be forwarded after sync",
-                    msg["channel_name"],
-                    msg["author"],
+                    "Sync in progress; message in #%s from %s is queued and will be sent after sync",
+                    msg["channel_name"], msg["author"],
                 )
                 self._pending_msgs.setdefault(source_id, []).append(msg)
                 return
 
             logger.warning(
-                "Mapped channel %s has no webhook; attempting to recreate", msg["channel_name"]
+                "Mapped channel %s has no webhook; attempting to recreate",
+                msg["channel_name"],
             )
             url = await self._recreate_webhook(source_id)
             if not url:
-                # recreate failed (e.g. channel not yet created) → buffer and retry post-sync
                 logger.info(
-                    "Could not recreate webhook for #%s; buffering message from %s",
-                    msg["channel_name"],
-                    msg["author"],
+                    "Could not recreate webhook for #%s; queued message from %s",
+                    msg["channel_name"], msg["author"],
                 )
                 self._pending_msgs.setdefault(source_id, []).append(msg)
                 return
 
-        # Build payload
+        # Build and validate payload
         payload = self._build_webhook_payload(msg)
         if payload is None:
             logger.info(
@@ -1795,65 +1807,67 @@ class ServerReceiver:
             logger.info("Skipping empty message for #%s", msg["channel_name"])
             return
 
-        # Ensure serializable
-        try:
-            import json
-
-            json.dumps(payload)
-        except (TypeError, ValueError) as e:
-            logger.error(
-                "Skipping message from #%s: payload not JSON serializable: %s; payload=%r",
-                msg["channel_name"],
-                e,
-                payload,
-            )
-            return
-
-        # Attempt send (with recreate-on-404)
-        for attempt in (1, 2):
+        if payload.get("content"):
             try:
-                async with self.session.post(url, json=payload) as resp:
-                    if resp.status in (200, 204):
-                        logger.info(
-                            "Forwarded message to #%s from %s",
-                            msg["channel_name"],
-                            msg["author"],
-                        )
-                        return
+                import json
+                json.dumps({"content": payload["content"]})
+            except (TypeError, ValueError) as e:
+                logger.error(
+                    "Skipping message from #%s: content not JSON serializable: %s; content=%r",
+                    msg["channel_name"], e, payload["content"],
+                )
+                return
 
-                    if resp.status == 404 and attempt == 1:
-                        logger.debug("Webhook %s 404; checking mapping...", url)
+        await self.ratelimit.acquire(ActionType.WEBHOOK, key=url)
 
-                        mapping = next(
-                            (
-                                r
-                                for r in self.db.get_all_channel_mappings()
-                                if r["original_channel_id"] == source_id
-                            ),
-                            None,
-                        )
+        webhook = Webhook.from_url(url, session=self.session)
 
-                        if not mapping or not mapping["channel_webhook_url"]:
-                            logger.warning(
-                                "No mapping for channel %s; buffering msg from %s",
-                                msg["channel_name"],
-                                msg["author"],
-                            )
-                            self._pending_msgs.setdefault(source_id, []).append(msg)
-                            return
+        try:
+            await webhook.send(
+                content=payload.get("content"),
+                embeds=payload.get("embeds"),
+                username=payload.get("username"),
+                avatar_url=payload.get("avatar_url"),
+                wait=True,
+            )
+            logger.info(
+                "Forwarded message to #%s from %s (User ID: %s)",
+                msg["channel_name"], msg["author"], msg["author_id"]
+            )
 
-                        url = await self._recreate_webhook(source_id)
-                        if not url:
-                            return
-                        continue
-
-                    body = await resp.text()
-                    logger.error("Failed to send (%s): %s", resp.status, body)
+        except HTTPException as e:
+            # Handle 404 by recreating once
+            if e.status == 404:
+                logger.debug("Webhook %s returned 404; attempting recreate...", url)
+                url = await self._recreate_webhook(source_id)
+                if not url:
+                    logger.warning(
+                        "No mapping for channel %s; msg from %s is queued and will be sent after sync",
+                        msg["channel_name"], msg["author"],
+                    )
+                    self._pending_msgs.setdefault(source_id, []).append(msg)
                     return
 
-            except Exception:
-                logger.exception("Error forwarding message to #%s", msg["channel_name"])
-                return
+                # Retry with new webhook
+                await self.ratelimit.acquire(ActionType.WEBHOOK, key=url)
+                webhook = Webhook.from_url(url, session=self.session)
+                await webhook.send(
+                    content=payload.get("content"),
+                    embeds=payload.get("embeds"),
+                    username=payload.get("username"),
+                    avatar_url=payload.get("avatar_url"),
+                    wait=True,
+                )
+                logger.info(
+                    "Forwarded message to #%s after recreate from %s",
+                    msg["channel_name"], msg["author"],
+                )
+
+            else:
+                logger.error(
+                    "Failed to send to #%s (status %s): %s",
+                    msg["channel_name"], e.status, e.text
+                )
 
     async def _shutdown(self):
         logger.info("Shutting down server...")
