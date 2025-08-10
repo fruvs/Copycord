@@ -3,7 +3,7 @@
 _Love this project? Give it a ⭐️ and let others know!_
 
 <p align="left">
-  <img src="logo/logo.png" alt="Copycord Logo" width="50"/>
+  <img src="logo/logo.png" alt="Copycord Logo" width="100"/>
 </p>
 
 **Copycord** is a Discord server cloner, designed to help you clone and synchronize an entire server in real time. By leveraging your user account’s WebSocket connection together with a dedicated bot, Copycord keeps your clone server fully up to date.
