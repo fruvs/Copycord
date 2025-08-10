@@ -1,4 +1,8 @@
-## 🛠 Clone Bot Commands Usage
+<p align="left">
+  <img src="../logo/logo.png" alt="Copycord Logo" width="100"/>
+</p>
+
+## Bot Commands Usage
 
 This document provides easy-to-follow instructions on how to use the available slash commands in the Bot.
 
