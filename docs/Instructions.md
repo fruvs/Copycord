@@ -1,6 +1,11 @@
+<p align="left">
+  <img src="../logo/logo.png" alt="Copycord Logo" width="100"/>
+</p>
+
 # How to Run Copycord with Docker
 
 This guide explains how to install Docker and Docker Compose and run Copycord.
+
 
 ---
 
