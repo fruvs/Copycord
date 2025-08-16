@@ -1,4 +1,5 @@
 [![Release](https://img.shields.io/github/v/release/copycord/copycord?label=Release)](https://github.com/copycord/copycord/releases/latest)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/ArFdqrJHBj)
 
 _Love this project? Give it a ⭐️ and let others know!_
 
