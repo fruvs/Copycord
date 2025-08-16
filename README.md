@@ -112,7 +112,7 @@ CLONE_STICKER=True # Clone stickers
 CLIENT_TOKEN= # Your discord account token
 HOST_GUILD_ID= # ID of the host guild to monitor
 
-ENABLE_CLONING=True # Enable/Disable cloning
+ENABLE_CLONING=True # Enable/Disable realtime cloning
 LOG_LEVEL=INFO # INFO or DEBUG
 ```
 
