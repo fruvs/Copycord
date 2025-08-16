@@ -74,9 +74,6 @@ This document provides easy-to-follow instructions on how to use the available s
 
 ---
 
-## 📢 Announcement System Commands
-
-Use these commands to configure keyword-based DMs for important updates.
 
 ### 6. `/announcement_trigger <keyword> <user_id> [channel_id]`
 
@@ -150,4 +147,27 @@ Use these commands to configure keyword-based DMs for important updates.
 ```
 
 ---
+
+### 10. `/start_member_export <include_names> <num_sessions>`
+
+**Description:** Begins scraping all members from the host guild using Discord’s member list gateway API. The scraper will run until it reaches the reported **guild member count**, ensuring near-complete coverage.  
+
+**Parameters:**
+* `include_names` (true/false): Whether to include usernames alongside IDs.  
+* `num_sessions` (1–5): Number of parallel sessions to use. More sessions = faster scrape, but higher chance of flagging your account.
+
+**Usage Examples:**
+
+```
+/start_member_export include_names:true num_sessions:3
+/start_member_export include_names:false num_sessions:5
+```
+
+---
+
+### 11. `/cancel_member_export`
+
+**Description:** Cancels any running member export job. The scraper stops safely and send you a DM with any results found.
+
+
 > *Ensure the bot has the correct permissions and that `COMMAND_USERS` in `config` includes your user ID.*
