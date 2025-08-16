@@ -16,8 +16,8 @@ _Love this project? Give it a ⭐️ and let others know!_
 > - The user account in the host server handles listening; a separate bot handles relaying, minimizing exposure
 > - Send DM announcements in realtime to specific users when a message contains a designated keyword
 > - Slash commands and community server features
-> - Clone entire channel message history 🆕
-> - Updated regularly with new feature requests
+> - Clone entire channel message history ✨🆕
+> - Scrape the host server member list and output a file containing all member IDs ✨🆕
 
 
 ## How It Works
@@ -104,7 +104,6 @@ services:
 SERVER_TOKEN= # Discord bot token
 CLONE_GUILD_ID= # ID of the clone guild, bot must be invited to this guild
 COMMAND_USERS= # Discord user IDs allowed to use commands separated by commas
-ENABLE_CLONING=True # Enable/Disable cloning
 DELETE_CHANNELS=True # Delete channels after they are deleted from the host server
 DELETE_THREADS=True # Delete threads after they are deleted from the host server
 CLONE_EMOJI=True # Clone emojis
@@ -113,6 +112,7 @@ CLONE_STICKER=True # Clone stickers
 CLIENT_TOKEN= # Your discord account token
 HOST_GUILD_ID= # ID of the host guild to monitor
 
+ENABLE_CLONING=True # Enable/Disable cloning
 LOG_LEVEL=INFO # INFO or DEBUG
 ```
 
