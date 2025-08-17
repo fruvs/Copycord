@@ -169,5 +169,22 @@ This document provides easy-to-follow instructions on how to use the available s
 
 **Description:** Cancels any running member export job. The scraper stops safely and send you a DM with any results found.
 
+---
+
+### 12. `/onjoin_dm <server_id>`
+
+**Description:** Toggles DM notifications when someone joins the specified server.  
+If enabled, you’ll receive a direct message with the new member’s details whenever someone joins that guild.
+> **Note:** Your account connected to Copycord must be a member of the server to detect when someone joins the server.
+
+**Parameters:**
+* `server_id` (required): The Discord server (guild) ID you want to watch.
+
+**Usage Example:**
+
+
+```
+/onjoin_dm 123456789012345678
+```
 
 > *Ensure the bot has the correct permissions and that `COMMAND_USERS` in `config` includes your user ID.*
