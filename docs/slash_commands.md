@@ -6,6 +6,9 @@
 
 This document provides easy-to-follow instructions on how to use the available slash commands in the Bot.
 
+> [!IMPORTANT]
+> *Ensure the bot has the correct permissions and that `COMMAND_USERS` in `config` includes your user ID.*
+
 ---
 
 ### 1. `/ping_server`
@@ -186,5 +189,3 @@ If enabled, you’ll receive a direct message with the new member’s details wh
 ```
 /onjoin_dm 123456789012345678
 ```
-
-> *Ensure the bot has the correct permissions and that `COMMAND_USERS` in `config` includes your user ID.*
