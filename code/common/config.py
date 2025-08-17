@@ -24,7 +24,7 @@ class Config:
         logger: Optional[logging.Logger] = None,
     ):
         self.logger = logger.getChild(self.__class__.__name__)
-        self.CURRENT_VERSION = "v1.7.0"
+        self.CURRENT_VERSION = "v1.8.0"
         self.GITHUB_API_LATEST = (
             "https://api.github.com/repos/Copycord/Copycord/releases/latest"
         )
