@@ -19,6 +19,7 @@ _Love this project? Give it a ⭐️ and let others know!_
 > - Slash commands and community server features
 > - Clone entire channel message history ✨🆕
 > - Scrape the host server member list and output a file containing all member IDs ✨🆕
+> - Get notified when someone joins any server your account is in✨🆕
 
 
 ## How It Works
