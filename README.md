@@ -47,9 +47,9 @@ _Love this project? Give it a ⭐️ and let others know!_
    Create a new Discord server to receive mirrored content.  
 
 2. **Obtain your user token**  
-   - Log into Discord in a browser with the listening account.
-       - Tested and working on [Brave](https://brave.com/download/) browser  
-   - Open Developer Tools (F12 or Ctrl+Shift+I) and run:
+   - Log into Discord in a browser with your account.
+   - Open Developer Tools (F12 or Ctrl+Shift+I)
+   - Enable device emulation mode (Ctrl+Shift+M), then paste the code below into the console and press Enter:
       ```js
       const iframe = document.createElement("iframe");
       console.log(
