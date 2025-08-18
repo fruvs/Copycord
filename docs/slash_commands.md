@@ -176,7 +176,7 @@ This document provides easy-to-follow instructions on how to use the available s
 
 ### 12. `/onjoin_dm <server_id>`
 
-**Description:** Toggles DM notifications when someone joins the specified server.  
+**Description:** Toggles DM notifications when someone joins the specified server. (Only works for servers with 1k or less members)
 If enabled, you’ll receive a direct message with the new member’s details whenever someone joins that guild.
 > **Note:** Your account connected to Copycord must be a member of the server to detect when someone joins the server.
 
