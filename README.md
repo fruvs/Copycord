@@ -128,7 +128,7 @@ CLONE_STICKER=True       # clone stickers
 CLONE_ROLES=True         # clone roles
 
 # --- ROLE PERMISSIONS ---
-MIRROR_ROLE_PERMISSIONS=True   # True: also mirror role perms; False: only name/color/etc
+MIRROR_ROLE_PERMISSIONS=False   # True: also mirror role perms; False: only name/color/etc
 
 # --- CLIENT (YOUR ACCOUNT watching the HOST guild) ---
 CLIENT_TOKEN=            # your user token
