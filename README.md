@@ -13,13 +13,14 @@ _Love this project? Give it a ⭐️ and let others know!_
 > **Features:**
 > - Clones host server categories and channels on first run
 > - Detects channel renames, position changes, and recreates missing channels on the fly
+> - Category and channel filtering
 > - Creates webhooks in all channels used to forward identical messages as they are sent
 > - The user account in the host server handles listening; a separate bot handles relaying, minimizing exposure
 > - Send DM announcements in realtime to specific users when a message contains a designated keyword
 > - Slash commands and community server features
 > - Clone entire channel message history ✨🆕
 > - Scrape the host server member list and output a file containing all member IDs ✨🆕
-> - Get notified when someone joins any server your account is in✨🆕
+>
 
 
 ## How It Works
@@ -74,16 +75,19 @@ _Love this project? Give it a ⭐️ and let others know!_
 
 ## Configuration
 
-### 1. Create a new folder and add `docker-compose.yml` and `.env` 
+### 1. Create a new /Copycord folder and add `docker-compose.yml` and `.env` 
 
 In the new folder, create `docker-compose.yml` and `.env`: 
 
-`docker-compose.yml`
+`Copycord/docker-compose.yml`
+<details>
+  <summary>Click to expand docker-compose.yml example</summary>
+
 ```yaml
 services:
   server:
     container_name: copycord-server
-    image: ghcr.io/copycord/copycord-server:v1.8.0
+    image: ghcr.io/copycord/copycord-server:v1.9.0
     env_file:
       - .env
     volumes:
@@ -92,7 +96,7 @@ services:
 
   client:
     container_name: copycord-client
-    image: ghcr.io/copycord/copycord-client:v1.8.0
+    image: ghcr.io/copycord/copycord-client:v1.9.0
     env_file:
       - .env
     volumes:
@@ -101,23 +105,80 @@ services:
       - server
     restart: unless-stopped
 ```
+</details>
 
-`.env`
+`Copycord/.env`
+<details>
+  <summary>Click to expand .env example</summary>
+  
 ```yaml
-SERVER_TOKEN= # Discord bot token
-CLONE_GUILD_ID= # ID of the clone guild, bot must be invited to this guild
-COMMAND_USERS= # Discord user IDs allowed to use commands separated by commas
-DELETE_CHANNELS=True # Delete channels after they are deleted from the host server
-DELETE_THREADS=True # Delete threads after they are deleted from the host server
-CLONE_EMOJI=True # Clone emojis
-CLONE_STICKER=True # Clone stickers
+# --- SERVER (BOT in the CLONE guild) ---
+SERVER_TOKEN=            # your bot token
+CLONE_GUILD_ID=          # destination guild ID (where cloning goes)
+COMMAND_USERS=           # comma-separated user IDs allowed to run server commands
 
-CLIENT_TOKEN= # Your discord account token
-HOST_GUILD_ID= # ID of the host guild to monitor
+# --- WHAT TO DELETE WHEN REMOVED ON HOST (defaults: True) ---
+DELETE_CHANNELS=True     # True: delete cloned channels; False: keep & drop mapping
+DELETE_THREADS=True      # True: delete cloned threads;  False: keep & drop mapping
+DELETE_ROLES=True        # True: delete cloned roles;    False: keep & drop mapping
 
-ENABLE_CLONING=True # Enable/Disable realtime cloning
-LOG_LEVEL=INFO # INFO or DEBUG
+# --- WHAT TO CLONE (toggle features) ---
+CLONE_EMOJI=True         # clone emojis
+CLONE_STICKER=True       # clone stickers
+CLONE_ROLES=True         # clone roles
+
+# --- ROLE PERMISSIONS ---
+MIRROR_ROLE_PERMISSIONS=True   # True: also mirror role perms; False: only name/color/etc
+
+# --- CLIENT (YOUR ACCOUNT watching the HOST guild) ---
+CLIENT_TOKEN=            # your user token
+HOST_GUILD_ID=           # source guild ID (what you’re mirroring)
+
+# --- RUNTIME ---
+ENABLE_CLONING=True      # master on/off for realtime cloning
+LOG_LEVEL=INFO           # INFO or DEBUG
 ```
+</details>
+
+### 2. Create the /data folder and add config.yml inside
+
+Create the /data folder in the main Copycord folder and the config file into /data: 
+
+`Copycord/data/config.yml`
+
+<details>
+  <summary>Click to expand config.yml example</summary>
+
+```yaml
+# Copycord config.yml
+#
+# How it works
+# ------------
+# • WHITELIST (allow-list):
+#     - If ANY IDs are listed, ONLY those categories/channels are cloned.
+#     - Leave BOTH WHITELIST lists empty to disable whitelist mode.
+#
+# • EXCLUDED (deny-list):
+#     - Drops whatever is listed.
+#
+# • Precedence (practical rules):
+#     1) Channel whitelist > channel exclude
+#     2) Channel exclude > category whitelist   <-- (lets you whitelist a category but drop a few channels)
+#     3) Category whitelist > category exclude
+#
+# • IDs:
+#     - Use IDs from the HOST guild (the source), not the clone guild.
+#     - Right-click → “Copy ID” in Discord (Developer Mode).
+
+whitelist:
+  categories: []   # e.g. [123456789012345678, 234567890123456789]
+  channels: []     # e.g. [345678901234567890]
+
+excluded:
+  categories: []   # e.g. [456789012345678901]
+  channels: []     # e.g. [567890123456789012]
+```
+</details>
 
 ### 3. Launch Copycord
 

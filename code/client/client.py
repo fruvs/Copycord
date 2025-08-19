@@ -11,21 +11,21 @@ import asyncio
 import contextlib
 import re
 import signal
-import traceback
 import unicodedata
 from datetime import datetime, timezone
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 import discord
-from discord import ChannelType, MessageType, Member
+from discord import ChannelType, MessageType
 from discord.errors import Forbidden, HTTPException
 import os
-import pprint
 import sys
 from discord.ext import commands
 from common.config import Config
 from common.db import DBManager
+from client.sitemap import SitemapService
+from client.message_utils import MessageUtils
 from common.websockets import WebsocketManager
 from client.scraper import MemberScraper
 from client.scraper import StreamManager
@@ -64,7 +64,13 @@ root.addHandler(fh)
 # keep library noise down
 for name in ("websockets.server", "websockets.protocol"):
     logging.getLogger(name).setLevel(logging.WARNING)
-for lib in ("discord","discord.client","discord.gateway","discord.state","discord.http"):
+for lib in (
+    "discord",
+    "discord.client",
+    "discord.gateway",
+    "discord.state",
+    "discord.http",
+):
     logging.getLogger(lib).setLevel(logging.WARNING)
 for lib in ("discord.state", "discord.client"):
     logging.getLogger(lib).setLevel(logging.ERROR)
@@ -82,8 +88,8 @@ class ClientListener:
         self._rebuild_blocklist(self.blocked_keywords)
         self.start_time = datetime.now(timezone.utc)
         self.bot = commands.Bot(command_prefix="!", self_bot=True)
+        self.msg = MessageUtils(self.bot)
         self._sync_task: Optional[asyncio.Task] = None
-        self.debounce_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
         self._m_user = re.compile(r"<@!?(\d+)>")
         self.scraper = getattr(self, "scraper", None)
@@ -91,7 +97,7 @@ class ClientListener:
         self.streams = getattr(self, "streams", StreamManager(logger))
         self._scrape_task: asyncio.Task | None = None
         self._last_cancel_at: float | None = None
-        self._cancelling: bool = False 
+        self._cancelling: bool = False
         self.do_precount = True
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
@@ -101,10 +107,21 @@ class ClientListener:
         self.bot.event(self.on_thread_delete)
         self.bot.event(self.on_thread_update)
         self.bot.event(self.on_member_join)
+        self.bot.event(self.on_guild_role_create)
+        self.bot.event(self.on_guild_role_delete)
+        self.bot.event(self.on_guild_role_update)
         self.ws = WebsocketManager(
             send_url=self.config.SERVER_WS_URL,
             listen_host=self.config.CLIENT_WS_HOST,
             listen_port=self.config.CLIENT_WS_PORT,
+            logger=logger,
+        )
+        self.sitemap = SitemapService(
+            bot=self.bot,
+            config=self.config,
+            db=self.db,
+            ws=self.ws,
+            host_guild_id=self.host_guild_id,
             logger=logger,
         )
 
@@ -150,8 +167,8 @@ class ClientListener:
             chan_id = int(data.get("channel_id"))
             asyncio.create_task(self._backfill_channel(chan_id))
             return {"ok": True}
-        
-        elif typ =="sitemap_request":
+
+        elif typ == "sitemap_request":
             if self.config.ENABLE_CLONING:
                 self.schedule_sync()
                 logger.info("[🌐] Received sitemap request")
@@ -162,7 +179,9 @@ class ClientListener:
         elif typ == "scrape_members":
             include_names = bool(data.get("include_names", True))
 
-            def clamp(v, lo, hi): return max(lo, min(hi, v))
+            def clamp(v, lo, hi):
+                return max(lo, min(hi, v))
+
             try:
                 ns = int(data.get("num_sessions", 2))
             except Exception:
@@ -194,7 +213,10 @@ class ClientListener:
                     )
                     try:
                         result = await self._scrape_task
-                        logger.debug("[scrape] TASK_AWAITED_OK count=%d", len((result or {}).get("members", [])))
+                        logger.debug(
+                            "[scrape] TASK_AWAITED_OK count=%d",
+                            len((result or {}).get("members", [])),
+                        )
                         return {"ok": True, "data": result}
                     except asyncio.CancelledError:
                         logger.debug("[scrape] TASK_AWAITED_CANCELLED")
@@ -241,14 +263,15 @@ class ClientListener:
                         {"members": members, "count": len(members)},
                         max_inline_bytes=800_000,
                     )
-                return self.streams.pack_json({"members": [], "count": 0}, max_inline_bytes=800_000)
+                return self.streams.pack_json(
+                    {"members": [], "count": 0}, max_inline_bytes=800_000
+                )
             except Exception as e:
                 logger.exception("[❌] scrape_snapshot failed")
                 return {"ok": False, "error": str(e)}
-            
 
         return None
-    
+
     async def _resolve_accessible_host_channel(self, orig_channel_id: int):
         """
         Maps a cloned channel id to its host channel id (if applicable), and returns a
@@ -264,7 +287,9 @@ class ClientListener:
         if hasattr(self, "chan_map"):
             for src_id, row in self.chan_map.items():
                 if int(row.get("cloned_channel_id") or 0) == channel_id:
-                    logger.debug(f"[map] Mapped cloned channel {channel_id} -> host channel {src_id}")
+                    logger.debug(
+                        f"[map] Mapped cloned channel {channel_id} -> host channel {src_id}"
+                    )
                     channel_id = int(src_id)
                     break
 
@@ -289,11 +314,15 @@ class ClientListener:
             guild = host_guild
 
         if guild is None:
-            raise discord.Forbidden(None, {"message": "No guild available for fallback"})
+            raise discord.Forbidden(
+                None, {"message": "No guild available for fallback"}
+            )
 
         # 4) If we couldn’t fetch the requested channel (or it’s None), pick the first readable text channel
         if channel is None:
-            me = guild.me or guild.get_member(getattr(getattr(self.bot, "user", None), "id", 0))
+            me = guild.me or guild.get_member(
+                getattr(getattr(self.bot, "user", None), "id", 0)
+            )
 
             def can_read(ch) -> bool:
                 try:
@@ -306,185 +335,28 @@ class ClientListener:
 
             readable = next((ch for ch in guild.text_channels if can_read(ch)), None)
             if not readable:
-                raise discord.Forbidden(None, {"message": "No accessible text channel found in the host guild."})
+                raise discord.Forbidden(
+                    None,
+                    {"message": "No accessible text channel found in the host guild."},
+                )
 
             channel = readable
             channel_id = readable.id
 
         return channel, channel_id, guild
 
-
-    async def build_and_send_sitemap(self):
-        """
-        Asynchronously builds and sends a sitemap of the Discord guild to the server.
-        The sitemap includes information about categories, standalone text channels, forums, threads, emojis,
-        stickers, and community settings of the guild. It fetches additional thread data from the database and ensures
-        all relevant information is sent to the server via a WebSocket connection.
-        """
-        guild = self.bot.get_guild(self.host_guild_id)
-        if not guild:
-            logger.error("[⛔] Guild %s not found", self.host_guild_id)
-            return
-
-        def _enum_int(val, default=0):
-            if val is None:
-                return default
-            v = getattr(val, "value", val)
-            try:
-                return int(v)
-            except Exception:
-                return default
-
-        def _sticker_url(s):
-            u = getattr(s, "url", None)
-            if not u:
-                asset = getattr(s, "asset", None)
-                u = getattr(asset, "url", None) if asset else None
-            return str(u) if u else ""
-
-        try:
-            fetched_stickers = await guild.fetch_stickers()
-        except Exception as e:
-            logger.warning("[🎟️] Could not fetch stickers: %s", e)
-            fetched_stickers = list(getattr(guild, "stickers", []))
-
-        sitemap = {
-            "categories": [],
-            "standalone_channels": [],
-            "forums": [],
-            "threads": [],
-            "emojis": [
-                {"id": e.id, "name": e.name, "url": str(e.url), "animated": e.animated}
-                for e in guild.emojis
-            ],
-            "stickers": [],
-            "community": {
-                "enabled": "COMMUNITY" in guild.features,
-                "rules_channel_id": (
-                    guild.rules_channel.id if guild.rules_channel else None
-                ),
-                "public_updates_channel_id": (
-                    guild.public_updates_channel.id
-                    if guild.public_updates_channel
-                    else None
-                ),
-            },
-        }
-
-        try:
-            guild_sticker_type_val = getattr(discord.StickerType, "guild").value
-        except Exception:
-            guild_sticker_type_val = 1
-
-        stickers_payload = []
-        for s in fetched_stickers:
-            stype = _enum_int(getattr(s, "type", None), default=guild_sticker_type_val)
-            if stype != guild_sticker_type_val:
-                continue
-
-            stickers_payload.append(
-                {
-                    "id": s.id,
-                    "name": s.name,
-                    "format_type": _enum_int(
-                        getattr(s, "format", None) or getattr(s, "format_type", None), 0
-                    ),
-                    "url": _sticker_url(s),
-                    "tags": getattr(s, "tags", "") or "",
-                    "description": getattr(s, "description", "") or "",
-                    "available": bool(getattr(s, "available", True)),
-                }
-            )
-        sitemap["stickers"] = stickers_payload
-
-        for cat in guild.categories:
-            channels = [
-                {"id": ch.id, "name": ch.name, "type": ch.type.value}
-                for ch in cat.channels
-                if isinstance(ch, discord.TextChannel)
-            ]
-            sitemap["categories"].append(
-                {"id": cat.id, "name": cat.name, "channels": channels}
-            )
-
-        sitemap["standalone_channels"] = [
-            {"id": ch.id, "name": ch.name, "type": ch.type.value}
-            for ch in guild.text_channels
-            if ch.category is None
-        ]
-
-        for forum in getattr(guild, "forums", []):
-            sitemap["forums"].append(
-                {
-                    "id": forum.id,
-                    "name": forum.name,
-                    "category_id": forum.category.id if forum.category else None,
-                }
-            )
-
-        seen = {t["id"] for t in sitemap["threads"]}
-        for row in self.db.get_all_threads():
-            orig_tid = row["original_thread_id"]
-            forum_orig = row["forum_original_id"]
-
-            if orig_tid in seen:
-                continue
-
-            thr = guild.get_channel(orig_tid)
-            if not thr:
-                try:
-                    thr = await self.bot.fetch_channel(orig_tid)
-                except Exception:
-                    continue
-
-            if not isinstance(thr, discord.Thread):
-                continue
-
-            sitemap["threads"].append(
-                {
-                    "id": thr.id,
-                    "forum_id": forum_orig,
-                    "name": thr.name,
-                    "archived": thr.archived,
-                }
-            )
-
-        await self.ws.send({"type": "sitemap", "data": sitemap})
-        logger.info("[📩] Sitemap sent to Server")
-
     async def periodic_sync_loop(self):
-        """
-        Periodically synchronizes data by building and sending a sitemap.
-        """
         await self.bot.wait_until_ready()
         await asyncio.sleep(5)
         while True:
             try:
-                await self.build_and_send_sitemap()
+                await self.sitemap.build_and_send()
             except Exception:
                 logger.exception("Error in periodic sync loop")
             await asyncio.sleep(self.config.SYNC_INTERVAL_SECONDS)
 
-    async def _debounced_sitemap(self):
-        """
-        An asynchronous helper method that ensures the sitemap is built and sent
-        after a short delay, while preventing multiple concurrent executions.
-        """
-        try:
-            await asyncio.sleep(1)
-            await self.build_and_send_sitemap()
-        finally:
-            self.debounce_task = None
-
     def schedule_sync(self):
-        """
-        Schedules a debounced synchronization task.
-
-        This method checks if a debounce task is already scheduled. If not, it creates
-        and schedules a new asynchronous task to perform a debounced sitemap synchronization.
-        """
-        if self.debounce_task is None:
-            self.debounce_task = asyncio.create_task(self._debounced_sitemap())
+        self.sitemap.schedule_sync()
 
     async def on_ready(self):
         """
@@ -508,26 +380,6 @@ class ClientListener:
         if self._ws_task is None:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
 
-    def extract_public_message_attrs(self, message: discord.Message) -> dict:
-        """
-        Extracts public (non-private and non-callable) attributes from a discord.Message object.
-        """
-        attrs = {}
-        for name in dir(message):
-            if name.startswith("_"):
-                continue
-
-            try:
-                value = getattr(message, name)
-            except Exception:
-                continue
-
-            if callable(value):
-                continue
-
-            attrs[name] = value
-        return attrs
-
     def _rebuild_blocklist(self, keywords: list[str] | None = None) -> None:
         if keywords is None:
             keywords = self.db.get_blocked_keywords()
@@ -546,6 +398,28 @@ class ClientListener:
         """
         Determines whether a given Discord message should be ignored based on various conditions.
         """
+        ch = message.channel
+        try:
+            # For text channels
+            ch_id = getattr(ch, "id", None)
+            cat_id = getattr(ch, "category_id", None)
+
+            # For threads: category_id lives on the parent forum
+            if (
+                isinstance(getattr(ch, "__class__", None), type)
+                and getattr(ch.__class__, "__name__", "") == "Thread"
+            ):
+                parent = getattr(ch, "parent", None)
+                if parent is not None:
+                    # parent is a ForumChannel (has its own category_id)
+                    cat_id = getattr(parent, "category_id", cat_id)
+
+            if self.sitemap.is_excluded_ids(ch_id, cat_id):
+                return True
+        except Exception:
+            # Fail-safe: don't break message flow
+            pass
+
         # Ignore thread_created events in text channels
         if message.type == MessageType.thread_created:
             return True
@@ -629,159 +503,13 @@ class ClientListener:
 
         return False
 
-    def _humanize_user_mentions(
-        self,
-        content: str,
-        message: discord.Message,
-        id_to_name_override: dict[str, str] | None = None,
-    ) -> str:
-        if not content:
-            return content
-
-        id_to_name = dict(id_to_name_override or {})
-
-        # seed with message.mentions (helps for content)
-        for m in getattr(message, "mentions", []):
-            name = f"@{(m.display_name if isinstance(m, Member) else m.name) or m.name}"
-            id_to_name[str(m.id)] = name
-
-        def repl(match: re.Match) -> str:
-            uid = match.group(1)
-            name = id_to_name.get(uid)
-            if name:
-                return name
-            g = message.guild
-            mem = g.get_member(int(uid)) if g else None
-            if mem:
-                nm = f"@{mem.display_name or mem.name}"
-                id_to_name[uid] = nm
-                return nm
-            return match.group(0)
-
-        return self._m_user.sub(repl, content)
-
-    def _sanitize_inline(self, s, message=None, id_map=None):
-        if not s:
-            return s
-        # Replace {mention} with actual mention text
-        if "{mention}" in s:
-            s = s.replace("{mention}", f"@{message.author.display_name}")
-        if message:
-            s = self._humanize_user_mentions(s, message, id_map)
-        return s
-
-    def _sanitize_embed_dict(
-        self,
-        d: dict,
-        message: discord.Message,
-        id_map: dict[str, str] | None = None,
-    ) -> dict:
-        e = dict(d)
-
-        # top-level
-        if "title" in e:
-            e["title"] = self._sanitize_inline(e.get("title"), message, id_map)
-        if "description" in e:
-            e["description"] = self._sanitize_inline(
-                e.get("description"), message, id_map
-            )
-
-        # author
-        if isinstance(e.get("author"), dict) and "name" in e["author"]:
-            e["author"] = dict(e["author"])
-            e["author"]["name"] = self._sanitize_inline(
-                e["author"].get("name"), message, id_map
-            )
-
-        # footer
-        if isinstance(e.get("footer"), dict) and "text" in e["footer"]:
-            e["footer"] = dict(e["footer"])
-            e["footer"]["text"] = self._sanitize_inline(
-                e["footer"].get("text"), message, id_map
-            )
-
-        # fields
-        if isinstance(e.get("fields"), list):
-            new_fields = []
-            for f in e["fields"]:
-                if not isinstance(f, dict):
-                    new_fields.append(f)
-                    continue
-                f2 = dict(f)
-                if "name" in f2:
-                    f2["name"] = self._sanitize_inline(f2.get("name"), message, id_map)
-                if "value" in f2:
-                    f2["value"] = self._sanitize_inline(
-                        f2.get("value"), message, id_map
-                    )
-                new_fields.append(f2)
-            e["fields"] = new_fields
-
-        return e
-
-    async def _build_mention_map(
-        self, message: discord.Message, embed_dicts: list[dict]
-    ) -> dict[str, str]:
-        ids: set[str] = set()
-
-        def _collect(s: str | None):
-            if not s:
-                return
-            ids.update(self._m_user.findall(s))
-
-        # collect from content
-        _collect(message.content)
-
-        # collect from embeds
-        for e in embed_dicts:
-            _collect(e.get("title"))
-            _collect(e.get("description"))
-            a = e.get("author") or {}
-            _collect(a.get("name"))
-            f = e.get("footer") or {}
-            _collect(f.get("text"))
-            for fld in e.get("fields") or []:
-                _collect(fld.get("name"))
-                _collect(fld.get("value"))
-
-        if not ids:
-            return {}
-
-        g = message.guild
-        id_to_name: dict[str, str] = {}
-
-        for sid in ids:
-            uid = int(sid)
-            # 1) cache
-            mem = g.get_member(uid) if g else None
-            if mem:
-                id_to_name[sid] = f"@{mem.display_name or mem.name}"
-                continue
-            # 2) fetch member for display name
-            try:
-                if g:
-                    mem = await g.fetch_member(uid)
-                    id_to_name[sid] = f"@{mem.display_name or mem.name}"
-                    continue
-            except Exception:
-                pass
-            # fallback: global user (no guild display name)
-            try:
-                u = await self.bot.fetch_user(uid)
-                id_to_name[sid] = f"@{u.name}"
-            except Exception:
-                # leave unresolved; replacer will keep original token
-                pass
-
-        return id_to_name
-
     async def on_message(self, message: discord.Message):
         """
         Handles incoming Discord messages and processes them for forwarding.
         This method is triggered whenever a message is sent in a channel the bot has access to.
         """
         if self.config.ENABLE_CLONING:
-            
+
             if self.should_ignore(message):
                 return
 
@@ -807,11 +535,12 @@ class ClientListener:
             ]
 
             raw_embeds = [e.to_dict() for e in message.embeds]
-            mention_map = await self._build_mention_map(message, raw_embeds)
+            mention_map = await self.msg.build_mention_map(message, raw_embeds)
             embeds = [
-                self._sanitize_embed_dict(e, message, mention_map) for e in raw_embeds
+                self.msg.sanitize_embed_dict(e, message, mention_map)
+                for e in raw_embeds
             ]
-            content = self._sanitize_inline(content, message, mention_map)
+            content = self.msg.sanitize_inline(content, message, mention_map)
 
             components: list[dict] = []
             for comp in message.components:
@@ -840,30 +569,9 @@ class ClientListener:
                 ChannelType.private_thread,
             )
 
-            def _enum_int(val, default=0):
-                v = getattr(val, "value", val)
-                try:
-                    return int(v)
-                except Exception:
-                    return default
-
-            def _sticker_url(s):
-                u = getattr(s, "url", None)
-                if not u:
-                    asset = getattr(s, "asset", None)
-                    u = getattr(asset, "url", None) if asset else None
-                return str(u) if u else ""
-
-            stickers_payload = []
-            for s in getattr(message, "stickers", []) or []:
-                stickers_payload.append(
-                    {
-                        "id": s.id,
-                        "name": s.name,
-                        "format_type": _enum_int(getattr(s, "format", None), 0),
-                        "url": _sticker_url(s),  # <-- add this
-                    }
-                )
+            stickers_payload = self.msg.stickers_payload(
+                getattr(message, "stickers", [])
+            )
 
             payload = {
                 "type": "thread_message" if is_thread else "message",
@@ -903,14 +611,6 @@ class ClientListener:
                 message.author.name,
             )
 
-            # Pull message attributes for debugging
-            # msg_attrs = self.extract_public_message_attrs(message)
-
-            # logger.debug(
-            #     "Full Message attributes:\n%s",
-            #     pprint.pformat(msg_attrs, indent=2, width=120),
-            # )
-
     async def on_thread_delete(self, thread: discord.Thread):
         """
         Event handler that is triggered when a thread is deleted in a Discord server.
@@ -921,6 +621,13 @@ class ClientListener:
         if self.config.ENABLE_CLONING:
             if thread.guild.id != self.host_guild_id:
                 return
+            if not self.sitemap.in_scope_thread(thread):
+                logger.debug(
+                    "[thread] Ignoring delete for filtered-out thread %s (parent=%s)",
+                    getattr(thread, "id", None),
+                    getattr(getattr(thread, "parent", None), "id", None),
+                )
+                return
             payload = {"type": "thread_delete", "data": {"thread_id": thread.id}}
             await self.ws.send(payload)
             logger.info("[📩] Notified server of deleted thread %s", thread.id)
@@ -928,29 +635,37 @@ class ClientListener:
     async def on_thread_update(self, before: discord.Thread, after: discord.Thread):
         """
         Handles updates to a Discord thread, such as renaming.
-
-        This method is triggered when a thread is updated in a guild. It checks if the
-        thread belongs to the specified host guild and if the thread's name has changed.
-        If a rename is detected, it constructs a payload with details about the change
-        and sends it through the WebSocket connection.
         """
-        if self.config.ENABLE_CLONING:
-            if before.guild and before.guild.id == self.host_guild_id:
-                if before.name != after.name:
-                    payload = {
-                        "type": "thread_rename",
-                        "data": {
-                            "thread_id": before.id,
-                            "new_name": after.name,
-                            "old_name": before.name,
-                            "parent_name": after.parent.name,
-                            "parent_id": after.parent.id,
-                        },
-                    }
-                    logger.info(
-                        f"[✏️] Thread rename detected: {before.id} {before.name!r} → {after.name!r}"
-                    )
-                    await self.ws.send(payload)
+        if not self.config.ENABLE_CLONING:
+            return
+        if not (before.guild and before.guild.id == self.host_guild_id):
+            return
+
+        if not (
+            self.sitemap.in_scope_thread(before) or self.sitemap.in_scope_thread(after)
+        ):
+            logger.debug(
+                "[thread] Ignoring update for filtered-out thread %s (parent=%s)",
+                getattr(before, "id", None),
+                getattr(getattr(before, "parent", None), "id", None),
+            )
+            return
+
+        if before.name != after.name:
+            payload = {
+                "type": "thread_rename",
+                "data": {
+                    "thread_id": before.id,
+                    "new_name": after.name,
+                    "old_name": before.name,
+                    "parent_name": getattr(after.parent, "name", None),
+                    "parent_id": getattr(after.parent, "id", None),
+                },
+            }
+            logger.info(
+                f"[✏️] Thread rename detected: {before.id} {before.name!r} → {after.name!r}"
+            )
+            await self.ws.send(payload)
 
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
         """
@@ -958,6 +673,13 @@ class ClientListener:
         """
         if self.config.ENABLE_CLONING:
             if channel.guild.id != self.host_guild_id:
+                return
+
+            if not self.sitemap.in_scope_channel(channel):
+                logger.debug(
+                    "Ignored create for filtered-out channel/category %s",
+                    getattr(channel, "id", None),
+                )
                 return
             self.schedule_sync()
 
@@ -967,6 +689,12 @@ class ClientListener:
         """
         if self.config.ENABLE_CLONING:
             if channel.guild.id != self.host_guild_id:
+                return
+            if not self.sitemap.in_scope_channel(channel):
+                logger.debug(
+                    "Ignored delete for filtered-out channel/category %s",
+                    getattr(channel, "id", None),
+                )
                 return
             self.schedule_sync()
 
@@ -982,6 +710,16 @@ class ClientListener:
             if before.guild.id != self.host_guild_id:
                 return
 
+            if not (
+                self.sitemap.in_scope_channel(before)
+                or self.sitemap.in_scope_channel(after)
+            ):
+                logger.debug(
+                    "Ignored update for filtered-out channel/category %s",
+                    getattr(before, "id", None),
+                )
+                return
+
             # Only resync if name or parent category changed
             name_changed = before.name != after.name
             parent_before = getattr(before, "category_id", None)
@@ -994,6 +732,43 @@ class ClientListener:
                 logger.debug(
                     "Ignored channel update for %s: non-structural change", before.id
                 )
+
+    async def on_guild_role_create(self, role: discord.Role):
+        if not self.config.ENABLE_CLONING or not getattr(
+            self.config, "CLONE_ROLES", True
+        ):
+            return
+        if role.guild.id != self.host_guild_id:
+            return
+        logger.debug("[roles] create: %s (%d) → scheduling sitemap", role.name, role.id)
+        self.schedule_sync()
+
+    async def on_guild_role_delete(self, role: discord.Role):
+        if not self.config.ENABLE_CLONING or not getattr(
+            self.config, "CLONE_ROLES", True
+        ):
+            return
+        if role.guild.id != self.host_guild_id:
+            return
+        logger.debug("[roles] delete: %s (%d) → scheduling sitemap", role.name, role.id)
+        self.schedule_sync()
+
+    async def on_guild_role_update(self, before: discord.Role, after: discord.Role):
+        if not self.config.ENABLE_CLONING or not getattr(
+            self.config, "CLONE_ROLES", True
+        ):
+            return
+        if after.guild.id != self.host_guild_id:
+            return
+        if not self.sitemap.role_change_is_relevant(before, after):
+            logger.debug(
+                "[roles] update ignored (irrelevant): %s (%d)", after.name, after.id
+            )
+            return
+        logger.debug(
+            "[roles] update: %s (%d) → scheduling sitemap", after.name, after.id
+        )
+        self.schedule_sync()
 
     async def on_member_join(self, member: discord.Member):
         try:
@@ -1010,19 +785,24 @@ class ClientListener:
                     "user_id": member.id,
                     "username": str(member),
                     "display_name": getattr(member, "display_name", member.name),
-                    "avatar_url": str(member.display_avatar.url) if member.display_avatar else None,
+                    "avatar_url": (
+                        str(member.display_avatar.url)
+                        if member.display_avatar
+                        else None
+                    ),
                     "joined_at": datetime.now(timezone.utc).isoformat(),
                 },
             }
             await self.ws.send(payload)
-            logger.info("[📩] Member join observed in %s: %s (%s) → notified server",
-                        guild.id, member.display_name, member.id)
+            logger.info(
+                "[📩] Member join observed in %s: %s (%s) → notified server",
+                guild.id,
+                member.display_name,
+                member.id,
+            )
 
         except Exception:
             logger.exception("Failed to forward member_joined")
-
-
-
 
     async def _backfill_channel(self, original_channel_id: int):
         """Grab all human/bot messages from a channel and send to server"""
@@ -1073,10 +853,10 @@ class ClientListener:
             if getattr(msg, "type", None) not in ALLOWED_TYPES:
                 return False
             return True
-        
+
         sent = 0
         last_ping = 0.0
-        
+
         try:
             if getattr(self, "do_precount", False):
                 total = 0
@@ -1101,37 +881,13 @@ class ClientListener:
 
                 # Embeds & mentions
                 raw_embeds = [e.to_dict() for e in m.embeds]
-                mention_map = await self._build_mention_map(m, raw_embeds)
+                mention_map = await self.msg.build_mention_map(m, raw_embeds)
                 embeds = [
-                    self._sanitize_embed_dict(e, m, mention_map) for e in raw_embeds
+                    self.msg.sanitize_embed_dict(e, m, mention_map) for e in raw_embeds
                 ]
-                content = self._sanitize_inline(content, m, mention_map)
+                content = self.msg.sanitize_inline(content, m, mention_map)
 
-                # Stickers payload
-                def _enum_int(val, default=0):
-                    v = getattr(val, "value", val)
-                    try:
-                        return int(v)
-                    except Exception:
-                        return default
-
-                def _sticker_url(s):
-                    u = getattr(s, "url", None)
-                    if not u:
-                        asset = getattr(s, "asset", None)
-                        u = getattr(asset, "url", None) if asset else None
-                    return str(u) if u else ""
-
-                stickers_payload = []
-                for s in getattr(m, "stickers", []) or []:
-                    stickers_payload.append(
-                        {
-                            "id": s.id,
-                            "name": s.name,
-                            "format_type": _enum_int(getattr(s, "format", None), 0),
-                            "url": _sticker_url(s),
-                        }
-                    )
+                stickers_payload = self.msg.stickers_payload(getattr(m, "stickers", []))
 
                 payload = {
                     "type": "message",
@@ -1172,11 +928,17 @@ class ClientListener:
 
         except Forbidden as e:
             # Prevent the unhandled task exception and report cleanly
-            logger.info("[backfill] history forbidden channel=%s: %s", original_channel_id, e)
+            logger.info(
+                "[backfill] history forbidden channel=%s: %s", original_channel_id, e
+            )
         except HTTPException as e:
-            logger.warning("[backfill] HTTP error channel=%s: %s", original_channel_id, e)
+            logger.warning(
+                "[backfill] HTTP error channel=%s: %s", original_channel_id, e
+            )
         finally:
-            await self.ws.send({"type": "backfill_done", "data": {"channel_id": original_channel_id}})
+            await self.ws.send(
+                {"type": "backfill_done", "data": {"channel_id": original_channel_id}}
+            )
 
     async def _shutdown(self):
         """

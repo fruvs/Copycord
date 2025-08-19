@@ -37,6 +37,7 @@ from server.rate_limiter import RateLimitManager, ActionType
 from server.discord_hooks import install_discord_rl_probe
 from server.emojis import EmojiManager
 from server.stickers import StickerManager
+from server.roles import RoleManager
 from server.backfill import BackfillManager
 from server.helpers import OnJoinService
 
@@ -141,6 +142,14 @@ class ServerReceiver:
             clone_guild_id=int(self.config.CLONE_GUILD_ID),
             session=self.session,
         )
+        self.roles = RoleManager(
+            bot=self.bot,
+            db=self.db,
+            ratelimit=self.ratelimit,
+            clone_guild_id=int(self.config.CLONE_GUILD_ID),
+            delete_roles=bool(self.config.DELETE_ROLES),
+            mirror_permissions=bool(self.config.MIRROR_ROLE_PERMISSIONS),
+        )
         self.onjoin = OnJoinService(self.bot, self.db, logger.getChild("OnJoin"))
         install_discord_rl_probe(self.ratelimit)
         # Discord guild/channel limits
@@ -148,6 +157,7 @@ class ServerReceiver:
         self.MAX_CATEGORIES = 50
         self.MAX_CHANNELS_PER_CATEGORY = 50
         self._EMOJI_RE = re.compile(r"<(a?):(?P<name>[^:]+):(?P<id>\d+)>")
+        self._m_role = re.compile(r"<@&(?P<id>\d+)>")
 
         async def _command_sync():
             try:
@@ -609,6 +619,10 @@ class ServerReceiver:
             # --- Sticker sync in background ---
             if self.config.CLONE_STICKER:
                 self.stickers.kickoff_sync()
+                
+            # --- Role sync in background ---   
+            if self.config.CLONE_ROLES:
+                self.roles.kickoff_sync(sitemap.get("roles", []))
 
             cat_created, ch_reparented = await self._repair_deleted_categories(
                 guild, sitemap
@@ -1329,40 +1343,64 @@ class ServerReceiver:
                 removed += 1
 
         return removed
+    
+    def _protected_channel_ids(self, guild: discord.Guild) -> set[int]:
+        ids = set()
+        for attr in ("rules_channel", "public_updates_channel", "system_channel"):
+            ch = getattr(guild, attr, None)
+            if ch:
+                ids.add(ch.id)
+        return ids
 
     async def _handle_removed_channels(
         self, guild: discord.Guild, incoming: List[Dict]
     ) -> int:
         """
-        Handles the removal of channels that are no longer present in the incoming list
-        of valid channel IDs. Deletes cloned channels if configured to do so and updates
-        the channel mapping accordingly.
+        Deletes cloned channels that are not present in 'incoming', except channels
+        that are protected by community/server settings. Always removes mappings.
         """
-        valid_ids = {c["id"] for c in incoming}
+        valid_ids = {int(c["id"]) for c in incoming}
         removed = 0
+        protected = self._protected_channel_ids(guild)
+
         for orig_id, row in list(self.chan_map.items()):
-            clone_id = row["cloned_channel_id"]
+            if int(orig_id) in valid_ids:
+                continue
 
-            if orig_id not in valid_ids:
-                ch = guild.get_channel(clone_id)
-                if ch:
-                    if self.config.DELETE_CHANNELS:
-                        await self.ratelimit.acquire(ActionType.DELETE_CHANNEL)
-                        await ch.delete()
-                        logger.info(
-                            "[🗑️] Deleted channel %s #%d",
-                            ch.name,
-                            ch.id,
-                        )
-                else:
+            clone_id = int(row["cloned_channel_id"])
+            ch = guild.get_channel(clone_id)
+
+            if ch and self.config.DELETE_CHANNELS:
+                # 1) Skip if protected
+                if ch.id in protected:
                     logger.info(
-                        "[🗑️] Cloned channel #%d not found; removing mapping",
-                        clone_id,
+                        "[🛡️] Skipping deletion of protected channel #%s (%d) (community/system assignment).",
+                        ch.name, ch.id
                     )
+                else:
+                    # 2) Try delete
+                    await self.ratelimit.acquire(ActionType.DELETE_CHANNEL)
+                    try:
+                        await ch.delete()
+                        logger.info("[🗑️] Deleted channel #%s (%d)", ch.name, ch.id)
+                    except discord.HTTPException as e:
+                        # 50074 = cannot delete a channel required for community servers
+                        if getattr(e, "code", None) == 50074 or "required for community" in str(e):
+                            logger.info(
+                                "[🛡️] API blocked deletion of #%s (%d): protected. Will skip and drop mapping.",
+                                getattr(ch, "name", "?"), ch.id
+                            )
+                        else:
+                            logger.warning("[⚠️] Failed to delete channel #%d: %s", ch.id, e)
 
-                self.db.delete_channel_mapping(orig_id)
-                self.chan_map.pop(orig_id, None)
-                removed += 1
+            elif not ch:
+                logger.info("[🗑️] Cloned channel #%d not found; removing mapping", clone_id)
+
+            # Always drop the mapping, even if we couldn't delete the channel.
+            self.db.delete_channel_mapping(orig_id)
+            self.chan_map.pop(orig_id, None)
+            removed += 1
+
         return removed
 
     async def _handle_renamed_categories(
@@ -1449,7 +1487,6 @@ class ServerReceiver:
             return
         async with self._new_webhook_gate:
             rem = self.ratelimit.remaining(ActionType.WEBHOOK_CREATE)
-            logger.debug("NEW_WEBHOOK pre-acquire cooldown remaining: %.2fs", rem)
             await self.ratelimit.acquire(ActionType.WEBHOOK_CREATE)
             webhook = await ch.create_webhook(name=name, avatar=avatar_bytes)
             logger.info("[➕] Created a webhook in channel %s", ch.name)
@@ -2137,6 +2174,14 @@ class ServerReceiver:
                     logger.warning(
                         "[⚠️] Failed to auto-archive thread %s: %s", thread.id, e
                     )
+                    
+    def _sanitize_inline(self, s: str | None) -> str | None:
+        if not s:
+            return s
+        s = self._replace_emoji_ids(s)
+        s = self._remap_channel_mentions(s)
+        s = self._remap_role_mentions(s)
+        return s
 
     def _replace_emoji_ids(self, content: str) -> str:
         """
@@ -2174,13 +2219,26 @@ class ServerReceiver:
             return match.group(0)
 
         return self._m_ch.sub(repl, content)
+    
 
-    def _sanitize_inline(self, s: str | None) -> str | None:
-        if not s:
-            return s
-        s = self._replace_emoji_ids(s)
-        s = self._remap_channel_mentions(s)
-        return s
+    def _remap_role_mentions(self, content: str) -> str:
+        """Map host role mentions to cloned role mentions using role_mappings."""
+        if not content:
+            return content
+
+        def repl(match: re.Match) -> str:
+            orig_role_id = int(match.group("id"))
+            row = self.db.get_role_mapping(orig_role_id) 
+
+            if row and "cloned_role_id" in row.keys():
+                cloned_id = row["cloned_role_id"]
+                if cloned_id:
+                    return f"<@&{cloned_id}>"
+
+            return match.group(0)
+
+        return self._m_role.sub(repl, content)
+
 
     def _build_webhook_payload(self, msg: Dict) -> dict:
         """
