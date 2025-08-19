@@ -11,7 +11,7 @@ _Love this project? Give it a ⭐️ and let others know!_
 
 > [!IMPORTANT]
 > **Features:**
-> - Clones host server categories and channels on first run
+> - Clone host server categories, channels, roles, emojis, stickers, and messages
 > - Detects channel renames, position changes, and recreates missing channels on the fly
 > - Category and channel filtering
 > - Creates webhooks in all channels used to forward identical messages as they are sent
@@ -20,7 +20,6 @@ _Love this project? Give it a ⭐️ and let others know!_
 > - Slash commands and community server features
 > - Clone entire channel message history ✨🆕
 > - Scrape the host server member list and output a file containing all member IDs ✨🆕
->
 
 
 ## How It Works
