@@ -139,7 +139,7 @@ LOG_LEVEL=INFO           # INFO or DEBUG
 ```
 </details>
 
-### 2. Create the /data folder and add config.yml inside
+### 2. Create the /data folder and add config.yml inside (optional)
 
 Create the /data folder in the main Copycord folder and the config file into /data: 
 
