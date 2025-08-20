@@ -18,8 +18,8 @@ _Love this project? Give it a ⭐️ and let others know!_
 > - The user account in the host server handles listening; a separate bot handles relaying, minimizing exposure
 > - Send DM announcements in realtime to specific users when a message contains a designated keyword
 > - Slash commands and community server features
-> - Clone entire channel message history ✨🆕
-> - **Member Scraper**: scrape the entire target servers member list and output a file containing all member IDs ✨🆕
+> - **Channel History Cloner**: Clone the target servers full message history for any viewable channel ✨🆕
+> - **Member Scraper**: Scrape the entire target servers member list and output a file containing all member IDs ✨🆕
 
 
 ## How It Works
