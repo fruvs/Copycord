@@ -19,7 +19,7 @@ _Love this project? Give it a ⭐️ and let others know!_
 > - Send DM announcements in realtime to specific users when a message contains a designated keyword
 > - Slash commands and community server features
 > - Clone entire channel message history ✨🆕
-> - Scrape the host server member list and output a file containing all member IDs ✨🆕
+> - **Member Scraper**: scrape the entire target servers member list and output a file containing all member IDs ✨🆕
 
 
 ## How It Works
