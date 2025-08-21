@@ -207,3 +207,8 @@ We appreciate all contributions:
 3. Commit your changes and open a [Pull Request](https://github.com/copycord/copycord/pulls), detailing your feature or fix.
 
 Thank you for helping improve Copycord!
+
+# Buy me a coffee
+If you are enjoying Copycord, consider buying me a coffee!
+
+<a href="https://buymeacoffee.com/xmacj" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
