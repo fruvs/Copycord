@@ -39,30 +39,14 @@ docker compose version
 
 ---
 
-## Step 2: Configure the Environment
-
-- Update your `.env` file and `docker-compose.yml` with your tokens and guild IDs.
-- Refer to the `README.md` in the repository for full configuration details.
-
----
-
-## Step 4: Start Copycord
+## Step 2: Start Copycord
 In your terminal, navigate to the Copycord directory you created:
 
 ```
 docker compose up -d
 ```
 
-This will start both the client and server containers.
----
-
-## Step 5: Monitor Logs (optional)
-
-```
-docker compose logs -f
-```
-
-This command shows live logs from the running containers. If you are on Windows, simply open the Docker Desktop app to view logs.
+This will start  the web ui http://localhost:8080
 
 ---
 
