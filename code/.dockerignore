@@ -31,9 +31,9 @@ venv/
 data/
 config/
 tmp/
+
 code/admin/frontend/node_modules
 code/admin/frontend/.vite
 code/admin/frontend/.cache
-code/admin/static/assets
-Dockerfile*
-.dockerignore
+
+code/admin/static/assets/

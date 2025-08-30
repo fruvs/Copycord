@@ -1,25 +1,25 @@
+// code/admin/frontend/vite.config.ts
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 
 export default defineConfig({
   root: ".",
+  base: "/static/",
   build: {
-    outDir: resolve(__dirname, "../static"),
-    emptyOutDir: false, 
+    outDir: "dist",
     assetsDir: "assets",
+    manifest: false,   // no manifest needed
     rollupOptions: {
-      input: {
-        main: resolve(__dirname, "src/main.js"),
-      },
+      input: { main: resolve(__dirname, "src/main.js") },
       output: {
         entryFileNames: "assets/main.js",
         chunkFileNames: "assets/[name].js",
-        assetFileNames: ({ name }) => {
-          if (name && name.endsWith(".css")) return "assets/main.css";
+        assetFileNames: (info) => {
+          if (info.name && info.name.endsWith(".css")) return "assets/main.css";
           return "assets/[name][extname]";
-        }
-      }
-    }
+        },
+      },
+    },
   },
-  server: { port: 5173 }
+  server: { port: 5173 },
 });

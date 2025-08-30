@@ -1,3 +1,16 @@
+
+FROM node:20-slim AS webbuild
+WORKDIR /frontend
+
+
+COPY code/admin/frontend/package*.json ./
+RUN npm ci
+
+
+COPY code/admin/frontend/ .
+RUN npm run build 
+
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -42,6 +55,9 @@ COPY code/client/  ./client/
 COPY code/common/  ./common/
 COPY code/control/ ./control/
 COPY code/entrypoint.sh /entrypoint.sh
+
+
+COPY --from=webbuild /frontend/dist/ /app/admin/static/
 
 RUN sed -i 's/\r$//' /entrypoint.sh \
  && sed -i '1s/^\xEF\xBB\xBF//' /entrypoint.sh \
