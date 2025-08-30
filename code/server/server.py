@@ -7,11 +7,11 @@
 #  https://www.gnu.org/licenses/agpl-3.0.en.html
 # =============================================================================
 
+import contextlib
 import signal
 import asyncio
 import logging
-from logging.handlers import RotatingFileHandler
-from typing import List, Optional, Tuple, Dict, Union
+from typing import List, Optional, Tuple, Dict, Union, Coroutine, Any
 import aiohttp
 import discord
 import re
@@ -28,18 +28,21 @@ from discord import (
 from discord.errors import HTTPException, Forbidden
 import os
 import sys
+import hashlib
+import time
 from datetime import datetime, timezone
 from asyncio import Queue
-from common.config import Config
-from common.websockets import WebsocketManager
+
+from common.config import Config, CURRENT_VERSION
+from common.websockets import WebsocketManager, AdminBus
 from common.db import DBManager
 from server.rate_limiter import RateLimitManager, ActionType
 from server.discord_hooks import install_discord_rl_probe
 from server.emojis import EmojiManager
 from server.stickers import StickerManager
 from server.roles import RoleManager
-from server.backfill import BackfillManager
-from server.helpers import OnJoinService
+from server.backfill import BackfillManager, BackfillTask, BackfillTracker
+from server.helpers import OnJoinService, VerifyController
 
 LOG_DIR = "/data"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -60,21 +63,16 @@ ch.setFormatter(formatter)
 ch.setLevel(LEVEL)
 root.addHandler(ch)
 
-log_file = os.path.join(LOG_DIR, "server.log")
-fh = RotatingFileHandler(
-    log_file,
-    maxBytes=10 * 1024 * 1024,
-    backupCount=1,
-    encoding="utf-8",
-)
-fh.setFormatter(formatter)
-fh.setLevel(LEVEL)
-root.addHandler(fh)
-
 # keep library noise down
 for name in ("websockets.server", "websockets.protocol"):
     logging.getLogger(name).setLevel(logging.WARNING)
-for lib in ("discord","discord.client","discord.gateway","discord.state","discord.http"):
+for lib in (
+    "discord",
+    "discord.client",
+    "discord.gateway",
+    "discord.state",
+    "discord.http",
+):
     logging.getLogger(lib).setLevel(logging.WARNING)
 logging.getLogger("discord.client").setLevel(logging.ERROR)
 
@@ -125,8 +123,18 @@ class ServerReceiver:
         self._unmapped_threads_warned: set[int] = set()
         self._webhooks: dict[str, Webhook] = {}
         self._warn_lock = asyncio.Lock()
+        self._active_backfills: set[int] = set()
+        self._send_tasks: set[asyncio.Task] = set()
+        self._wh_identity_state: dict[int, bool] = {}
+        self._wh_meta: dict[int, dict] = {} 
+        self._wh_meta_ttl = 300
+        self._default_avatar_sha1: str | None = None
         self._shutting_down = False
         orig_on_connect = self.bot.on_connect
+        self.bus = AdminBus(
+            role="server", logger=logger, admin_ws_url=self.config.ADMIN_WS_URL
+        )
+        self.backfills = BackfillTracker(self.bus)
         self.ratelimit = RateLimitManager()
         self.emojis = EmojiManager(
             bot=self.bot,
@@ -171,6 +179,14 @@ class ServerReceiver:
         self.bot.on_connect = _command_sync
         self.bot.load_extension("server.commands")
 
+    def _track(
+        self, coro: Coroutine[Any, Any, Any], name: str | None = None
+    ) -> asyncio.Task:
+        t = asyncio.create_task(coro, name=name or "send")
+        self._send_tasks.add(t)
+        t.add_done_callback(lambda tt: self._send_tasks.discard(tt))
+        return t
+
     async def update_status(self, message: str):
         """Update the bot's Discord status."""
         try:
@@ -187,7 +203,23 @@ class ServerReceiver:
         """
         Event handler that is called when the bot is ready.
         """
-        await self.update_status(f"{self.config.CURRENT_VERSION}")
+        if not hasattr(self, "verify"):
+            self.verify = VerifyController(
+                bus=self.bus,
+                admin_base_url=self.config.ADMIN_WS_URL,
+                bot=self.bot,
+                guild_id=self.clone_guild_id,
+                db=self.db,
+                ratelimit=self.ratelimit,
+                get_protected_channel_ids=self._protected_channel_ids,
+                action_type_delete_channel=ActionType.DELETE_CHANNEL,
+                logger=logger,
+            )
+            self.verify.start()
+        self._verify_task = asyncio.create_task(self._verify_listen_loop())
+        await self.bus.log("Boot completed")
+        await self.update_status(f"{CURRENT_VERSION}")
+
         asyncio.create_task(self.config.setup_release_watcher(self))
         self.session = aiohttp.ClientSession()
         # Ensure we're in the clone guild
@@ -206,23 +238,92 @@ class ServerReceiver:
         await self.stickers.refresh_cache()
         await self._backfill_channel_types()
 
-        logger.info(
-            "[🤖] Logged in as %s and monitoring guild %s ",
-            self.bot.user,
-            clone_guild.name,
+        member = clone_guild.get_member(self.bot.user.id)
+        if member:
+            msg = f"Logged in as {member.display_name} in {clone_guild.name}"
+        else:
+            msg = f"Logged in as {self.bot.user.name} in {clone_guild.name}"
+
+        await self.bus.status(
+            running=True, status=msg, discord={"ready": True}
         )
+
+        logger.info("[🤖] %s", msg)
+
         if not self.config.ENABLE_CLONING:
             logger.info("[🔕] Server cloning is disabled...")
+            
+        asyncio.create_task(self.backfill.cleanup_non_primary_webhooks())
 
         if not self._processor_started:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
             self._sitemap_task = asyncio.create_task(self.process_sitemap_queue())
             self._processor_started = True
+            
+    def _canonical_webhook_name(self) -> str:
+        # Single place to define your canonical default
+        return self.backfill._canonical_temp_name()  # "Copycord"
+
+    async def _primary_name_changed_from_db(self, any_channel_id: int) -> tuple[bool, str | None, int | None, int | None]:
+        """
+        Returns (changed, current_name, original_id, clone_id)
+        changed=True iff primary webhook *name* != canonical; None-safe on failures.
+        """
+        try:
+            # Reuse DB to resolve ids regardless of which side fired the event.
+            orig_id, clone_id, _ = self.db.resolve_original_from_any_id(int(any_channel_id))
+            if not orig_id:
+                return False, None, None, None
+
+            row = self.db.get_channel_mapping_by_original_id(int(orig_id))
+            if not row:
+                # fallback: try via clone
+                if clone_id:
+                    row = self.db.get_channel_mapping_by_clone_id(int(clone_id))
+                if not row:
+                    return False, None, orig_id, clone_id
+
+            purl = row["channel_webhook_url"]
+            if not purl:
+                return False, None, orig_id, clone_id
+
+            wid = int(str(purl).rstrip("/").split("/")[-2])
+            wh = await self.bot.fetch_webhook(wid)
+
+            current = (wh.name or "").strip()
+            canonical = self._canonical_webhook_name()
+            changed = bool(current and current != canonical)
+            return changed, current, orig_id, clone_id
+        except Exception:
+            return False, None, None, None
+
+    async def _log_primary_name_toggle_if_needed(self, any_channel_id: int) -> None:
+        changed, current_name, orig_id, clone_id = await self._primary_name_changed_from_db(any_channel_id)
+        if orig_id is None:
+            return
+
+        prev = self._wh_identity_state.get(orig_id)
+        if prev is not None and prev == changed:
+            return  # no toggle; avoid spam
+
+        self._wh_identity_state[orig_id] = changed
+
+        # Build a helpful, one-time message
+        try:
+            where = f"clone #{clone_id}" if clone_id else f"original #{orig_id}"
+            canonical = self._canonical_webhook_name()
+            if changed:
+                logger.warning(
+                    "[ℹ️] Primary webhook name changed to %r in %s — "
+                    "per-message author metadata (username & avatar) will be DISABLED to honor the webhook's identity. "
+                    "If you want author metadata again, rename the webhook back to %r.",
+                    current_name, where, canonical
+                )
+        except Exception:
+            pass
+
 
     async def on_webhooks_update(self, channel: discord.abc.GuildChannel):
-        """
-        Handles the event triggered when webhooks are updated in a guild channel.
-        """
         if self.config.ENABLE_CLONING:
             if self._shutting_down:
                 return
@@ -231,12 +332,13 @@ class ServerReceiver:
                     return
             except AttributeError:
                 return
-            # Zap the cached pool so the next send rebuilds and includes any new “Copycord” hooks
             self.backfill.invalidate_rotation(int(channel.id))
-            logger.debug(
-                "[rotate] Webhooks changed in #%s — webhook rotation pool invalidated",
-                channel.id,
-            )
+            self._wh_meta.clear()  # wipe so next send re-checks identity
+
+            await self._log_primary_name_toggle_if_needed(int(channel.id))
+
+            logger.debug("[rotate] Webhooks changed in #%s — rotation invalidated + meta cleared", channel.id)
+
 
     async def on_guild_channel_delete(self, channel):
         """When a cloned channel/category is deleted, request a sitemap"""
@@ -315,6 +417,20 @@ class ServerReceiver:
             # Ask the client to send over the sitemap
             await self.bot.ws_manager.send({"type": "sitemap_request"})
 
+    async def _verify_listen_loop(self):
+        """
+        Subscribes to /ws/out and handles UI 'verify' requests.
+        """
+        base = self._admin_base()
+
+        async def _handler(ev: dict):
+            if ev.get("kind") != "verify" or ev.get("role") != "ui":
+                return
+            payload = ev.get("payload") or {}
+            await self._handle_verify_payload(payload)
+
+        await self.bus.subscribe(base, _handler)
+
     async def _on_ws(self, msg: dict):
         """
         Handles incoming WebSocket messages and dispatches them based on their type.
@@ -324,6 +440,8 @@ class ServerReceiver:
         typ = msg.get("type")
         data = msg.get("data", {})
         if typ == "sitemap":
+            if getattr(self, "_shutting_down", False):
+                return
             self._sitemap_task_counter += 1
             task_id = self._sitemap_task_counter
             self.sitemap_queue.put_nowait((task_id, data))
@@ -337,20 +455,27 @@ class ServerReceiver:
         elif typ == "message":
             ct = data.get("channel_type")
             if ct in (ChannelType.voice.value, ChannelType.stage_voice.value):
-                logger.debug(
-                    "[🔇] Dropping message for voice/stage_voice channel (type: %s, data: %s)",
-                    ct,
-                    data,
-                )
+                logger.debug("[🔇] Drop voice/stage msg | type=%s data=%s", ct, data)
                 return
+
             if data.get("__backfill__"):
-                t = asyncio.create_task(self.forward_message(data))
-                self.backfill.attach_task(int(data.get("channel_id")), t)
+                try:
+                    orig = int(data.get("channel_id"))
+                except Exception:
+                    return
+                if orig not in self._active_backfills:
+                    logger.warning(
+                        "Dropping stray backfill message for %s (no active lock)", orig
+                    )
+                    return
+                t = self._track(self._handle_backfill_message(data), name="bf-handle")
+                self.backfill.attach_task(orig, t)
             else:
-                asyncio.create_task(self.forward_message(data))
+                # Live message path (unchanged)
+                self._track(self.forward_message(data), name="live-forward")
 
         elif typ == "thread_message":
-            asyncio.create_task(self.handle_thread_message(data))
+            self._track(self.handle_thread_message(data), name="thread-msg")
 
         elif typ == "thread_delete":
             asyncio.create_task(self.handle_thread_delete(data))
@@ -361,22 +486,111 @@ class ServerReceiver:
         elif typ == "announce":
             asyncio.create_task(self.handle_announce(data))
 
+        # --- Backfill control plane -------------------------------------------------
         elif typ == "backfill_started":
-            await self.backfill.on_started(int(data.get("channel_id")))
+            data = msg.get("data") or {}
+            cid_raw = data.get("channel_id")
+            try:
+                orig = int(cid_raw)
+            except (TypeError, ValueError):
+                logger.error("backfill_started missing/invalid channel_id: %r", cid_raw)
+                return
+
+            # if already running, warn the UI and bail
+            if orig in self._active_backfills:
+                await self.bus.publish(
+                    "client", {"type": "backfill_busy", "data": {"channel_id": orig}}
+                )
+                return
+
+            self._active_backfills.add(orig)
+
+            # NOTE: range comes from data, not msg
+            await self.backfill.on_started(orig, meta={"range": data.get("range")})
+
+            # let the UI know we accepted the job
+            await self.bus.publish(
+                "client",
+                {"type": "backfill_ack", "data": {"channel_id": str(orig)}, "ok": True},
+            )
+            return
 
         elif typ == "backfill_progress":
-            await self.backfill.on_progress(
-                int(data.get("channel_id")), int(data.get("count") or 0)
-            )
+            data = msg.get("data") or {}
+            cid_raw = data.get("channel_id")
+            try:
+                cid = int(cid_raw)
+            except (TypeError, ValueError):
+                logger.error(
+                    "backfill_progress missing/invalid channel_id: %r", cid_raw
+                )
+                return
 
-        elif typ == "backfill_done":
-            await self.backfill.on_done(int(data.get("channel_id")))
-            
+            # accept both legacy {count} and new {sent}/{total}
+            total = data.get("total")
+            sent = data.get("sent")
+            count = data.get("count")
+
+            if total is not None:
+                try:
+                    self.backfill.update_expected_total(cid, int(total))
+                except Exception:
+                    pass
+            if sent is not None:
+                try:
+                    await self.backfill.on_progress(cid, int(sent))
+                except Exception:
+                    pass
+            elif count is not None:
+                try:
+                    await self.backfill.on_progress(cid, int(count))
+                except Exception:
+                    pass
+
+            delivered, total_est = self.backfill.get_progress(cid)
+
+            await self.bus.publish(
+                "client",
+                {
+                    "type": "backfill_progress",
+                    "data": {
+                        "channel_id": str(cid),
+                        "delivered": delivered,
+                        "total": total_est,
+                    },
+                },
+            )
+            return
+
+        elif typ in ("backfill_done", "backfill_stream_end"):
+            data = msg.get("data") or {}
+            cid_raw = data.get("channel_id")
+            try:
+                orig = int(cid_raw)
+            except (TypeError, ValueError):
+                logger.error("backfill_done missing/invalid channel_id: %r", cid_raw)
+                return
+
+            try:
+                await self.backfill.on_done(orig)  # await full drain/apply
+                delivered, total_est = self.backfill.get_progress(orig)
+                await self.bus.publish(
+                    "client",
+                    {
+                        "type": "backfill_done",
+                        "data": {
+                            "channel_id": str(orig),
+                            "sent": delivered,
+                            "total": total_est,
+                        },
+                    },
+                )
+            finally:
+                self._active_backfills.discard(orig)
+            return
+
         elif typ == "member_joined":
             asyncio.create_task(self.onjoin.handle_member_joined(data))
-
-        else:
-            logger.warning("[⚠️] Unknown WS type '%s'", typ)
 
     async def process_sitemap_queue(self):
         """Continuously process only the newest sitemap, discarding any others."""
@@ -619,8 +833,8 @@ class ServerReceiver:
             # --- Sticker sync in background ---
             if self.config.CLONE_STICKER:
                 self.stickers.kickoff_sync()
-                
-            # --- Role sync in background ---   
+
+            # --- Role sync in background ---
             if self.config.CLONE_ROLES:
                 self.roles.kickoff_sync(sitemap.get("roles", []))
 
@@ -774,7 +988,11 @@ class ServerReceiver:
                         continue
 
                     ch = guild.get_channel(ch_row["cloned_channel_id"])
-                    ctype = ch.type.value if ch else None
+                    ctype = (
+                        int(ch.type.value)
+                        if ch
+                        else int(ch_row.get("channel_type") or ChannelType.text.value)
+                    )
 
                     self.db.upsert_channel_mapping(
                         ch_orig_id,
@@ -953,13 +1171,10 @@ class ServerReceiver:
                     if orig in self.chan_map:
                         self.chan_map[orig]["channel_type"] = ChannelType.news.value
 
-            # 3) Rename if needed
-            if ch.name != name:
-                old = ch.name
-                await self.ratelimit.acquire(ActionType.EDIT_CHANNEL)
-                await ch.edit(name=name)
+            # 3) Rename if needed (ignore user defined named channels)
+            did_rename, _reason = await self._maybe_rename_channel(ch, name, orig)
+            if did_rename:
                 renamed += 1
-                logger.info("[✏️] Renamed channel #%d: %r → %r", ch.id, old, name)
 
         if created:
             parts.append(f"Created {created} channels")
@@ -1318,6 +1533,86 @@ class ServerReceiver:
                 )
         return ch
 
+    async def _maybe_rename_channel(
+        self,
+        ch: discord.abc.GuildChannel,
+        upstream_name: str,
+        orig_source_id: int,
+    ) -> tuple[bool, str]:
+        """
+        Ensure the cloned channel's name is correct given:
+        - upstream_name: the current name from the host/server (client sitemap)
+        - clone "pin": channel_mappings.clone_channel_name
+
+        Rules:
+        - If a pin (clone_channel_name) exists:
+            * If the live clone name != pin, rename to the pin.
+            * Always persist the latest upstream name into DB (mapping), but keep the pin.
+        - If no pin:
+            * If live clone name != upstream_name, rename to upstream_name.
+
+        Returns:
+        (did_rename, reason)
+            reason ∈ {"pinned_enforced","match_upstream","skipped_already_ok","skipped_error"}
+        """
+        try:
+            # Get mapping (refresh if missing)
+            mapping = self.chan_map.get(orig_source_id)
+            if mapping is None:
+                with contextlib.suppress(Exception):
+                    self._load_mappings()
+                    mapping = self.chan_map.get(orig_source_id)
+
+            # Extract pin, normalize
+            pinned_name_raw = (mapping or {}).get("clone_channel_name") or ""
+            pinned_name = pinned_name_raw.strip()
+            has_pin = bool(pinned_name)
+
+            # Always keep DB's original_channel_name in sync with upstream, preserving pin
+            if mapping is not None:
+                try:
+                    self.db.upsert_channel_mapping(
+                        orig_source_id,
+                        upstream_name,  # record the latest upstream/host name
+                        mapping.get("cloned_channel_id"),
+                        mapping.get("channel_webhook_url"),
+                        mapping.get("original_parent_category_id"),
+                        mapping.get("cloned_parent_category_id"),
+                        int(getattr(ch.type, "value", 0)),
+                        clone_name=pinned_name if has_pin else None,  # COALESCE preserves existing pin
+                    )
+                    # keep in-memory map current
+                    mapping["original_channel_name"] = upstream_name
+                    if has_pin:
+                        mapping["clone_channel_name"] = pinned_name
+                except Exception:
+                    logger.debug("[rename] mapping upsert failed", exc_info=True)
+
+            # Decide what to name the clone
+            if has_pin:
+                # Pin wins; enforce it on the live clone if drifted
+                if ch.name != pinned_name:
+                    old = ch.name
+                    await self.ratelimit.acquire(ActionType.EDIT_CHANNEL)
+                    await ch.edit(name=pinned_name)
+                    logger.info("[📌] Enforced pinned name on #%d: %r → %r", ch.id, old, pinned_name)
+                    return True, "pinned_enforced"
+                return False, "skipped_already_ok"
+
+            # No pin → follow upstream
+            if ch.name != upstream_name:
+                old = ch.name
+                await self.ratelimit.acquire(ActionType.EDIT_CHANNEL)
+                await ch.edit(name=upstream_name)
+                logger.info("[✏️] Renamed channel #%d: %r → %r", ch.id, old, upstream_name)
+                return True, "match_upstream"
+
+            return False, "skipped_already_ok"
+
+        except Exception:
+            logger.debug("[rename] _maybe_apply_pinned_or_upstream_name error", exc_info=True)
+            return False, "skipped_error"
+
     async def _handle_removed_categories(
         self, guild: discord.Guild, sitemap: Dict
     ) -> int:
@@ -1343,7 +1638,6 @@ class ServerReceiver:
                 removed += 1
 
         return removed
-    
     def _protected_channel_ids(self, guild: discord.Guild) -> set[int]:
         ids = set()
         for attr in ("rules_channel", "public_updates_channel", "system_channel"):
@@ -1375,7 +1669,8 @@ class ServerReceiver:
                 if ch.id in protected:
                     logger.info(
                         "[🛡️] Skipping deletion of protected channel #%s (%d) (community/system assignment).",
-                        ch.name, ch.id
+                        ch.name,
+                        ch.id,
                     )
                 else:
                     # 2) Try delete
@@ -1385,16 +1680,23 @@ class ServerReceiver:
                         logger.info("[🗑️] Deleted channel #%s (%d)", ch.name, ch.id)
                     except discord.HTTPException as e:
                         # 50074 = cannot delete a channel required for community servers
-                        if getattr(e, "code", None) == 50074 or "required for community" in str(e):
+                        if getattr(
+                            e, "code", None
+                        ) == 50074 or "required for community" in str(e):
                             logger.info(
                                 "[🛡️] API blocked deletion of #%s (%d): protected. Will skip and drop mapping.",
-                                getattr(ch, "name", "?"), ch.id
+                                getattr(ch, "name", "?"),
+                                ch.id,
                             )
                         else:
-                            logger.warning("[⚠️] Failed to delete channel #%d: %s", ch.id, e)
+                            logger.warning(
+                                "[⚠️] Failed to delete channel #%d: %s", ch.id, e
+                            )
 
             elif not ch:
-                logger.info("[🗑️] Cloned channel #%d not found; removing mapping", clone_id)
+                logger.info(
+                    "[🗑️] Cloned channel #%d not found; removing mapping", clone_id
+                )
 
             # Always drop the mapping, even if we couldn't delete the channel.
             self.db.delete_channel_mapping(orig_id)
@@ -1488,8 +1790,16 @@ class ServerReceiver:
         async with self._new_webhook_gate:
             rem = self.ratelimit.remaining(ActionType.WEBHOOK_CREATE)
             await self.ratelimit.acquire(ActionType.WEBHOOK_CREATE)
+            try:
+                await self._get_default_avatar_bytes()
+            except Exception:
+                pass
             webhook = await ch.create_webhook(name=name, avatar=avatar_bytes)
             logger.info("[➕] Created a webhook in channel %s", ch.name)
+
+            if hasattr(self, "_wh_meta"):
+                self._wh_meta.clear()
+
             return webhook
 
     async def _ensure_channel_and_webhook(
@@ -1678,27 +1988,73 @@ class ServerReceiver:
         return moved
 
     async def _get_default_avatar_bytes(self) -> Optional[bytes]:
-        """Fetch (and cache) the default webhook avatar."""
-        if self._shutting_down:
-            return
         if self._default_avatar_bytes is None:
             url = self.config.DEFAULT_WEBHOOK_AVATAR_URL
             if not url:
                 return None
-
             try:
                 if self.session is None or self.session.closed:
                     self.session = aiohttp.ClientSession()
                 async with self.session.get(url) as resp:
                     if resp.status == 200:
                         self._default_avatar_bytes = await resp.read()
+                        # NEW: hash for comparison
+                        self._default_avatar_sha1 = hashlib.sha1(self._default_avatar_bytes).hexdigest()
                     else:
-                        logger.warning(
-                            "[⚠️] Avatar download failed %s (HTTP %s)", url, resp.status
-                        )
+                        logger.warning("[⚠️] Avatar download failed %s (HTTP %s)", url, resp.status)
             except Exception as e:
                 logger.warning("[⚠️] Error downloading avatar %s: %s", url, e)
         return self._default_avatar_bytes
+    
+    async def _get_webhook_meta(self, original_id: int, webhook_url: str, *, force: bool = False) -> dict:
+        """Return cached info about whether the channel webhook was customized by the user."""
+        now = time.time()
+        meta = self._wh_meta.get(original_id)
+        if meta and not force and (now - meta.get("checked_at", 0) < self._wh_meta_ttl):
+            return meta
+
+        try:
+            webhook_id = int(webhook_url.rstrip("/").split("/")[-2])
+        except Exception:
+            # Fallback: treat as not custom to avoid breaking sends
+            meta = {"custom": False, "name": None, "avatar_sha1": None, "checked_at": now}
+            self._wh_meta[original_id] = meta
+            return meta
+
+        # Ensure we have a session
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+
+        try:
+            wh = await self.bot.fetch_webhook(webhook_id)
+        except (NotFound, HTTPException):
+            # Will likely recreate later; not custom
+            meta = {"custom": False, "name": None, "avatar_sha1": None, "checked_at": now}
+            self._wh_meta[original_id] = meta
+            return meta
+
+        # Evaluate avatar
+        avatar_sha = None
+        custom_avatar = False
+        try:
+            if wh.avatar:
+                b = await wh.avatar.read()
+                avatar_sha = hashlib.sha1(b).hexdigest()
+                if self._default_avatar_sha1:
+                    custom_avatar = (avatar_sha != self._default_avatar_sha1)
+                else:
+                    # If we don't have a default set, treat any avatar as custom
+                    custom_avatar = True
+        except Exception:
+            # If we can't read it, be conservative and assume not custom
+            custom_avatar = False
+
+        custom_name = (wh.name or "") != "Copycord"
+        custom = custom_name or custom_avatar
+
+        meta = {"custom": custom, "name": wh.name, "avatar_sha1": avatar_sha, "checked_at": now}
+        self._wh_meta[original_id] = meta
+        return meta
 
     async def _recreate_webhook(self, original_id: int) -> Optional[str]:
         """
@@ -1780,6 +2136,7 @@ class ServerReceiver:
                     chan_ids={original_id},
                     thread_parent_ids={original_id},
                 )
+                self._wh_meta.pop(original_id, None)
                 return new_url
 
             except Exception:
@@ -1844,6 +2201,11 @@ class ServerReceiver:
 
         # build payload
         payload = self._build_webhook_payload(data)
+        meta = await self._get_webhook_meta(parent_id, webhook_url)
+        if meta.get("custom"):
+            # remove author spoofing if webhook was modified
+            payload.pop("username", None)
+            payload.pop("avatar_url", None)
         if not payload or (not payload.get("content") and not payload.get("embeds")):
             logger.info("[⚠️] Skipping empty payload for '%s'", data["thread_name"])
             return
@@ -2174,7 +2536,6 @@ class ServerReceiver:
                     logger.warning(
                         "[⚠️] Failed to auto-archive thread %s: %s", thread.id, e
                     )
-                    
     def _sanitize_inline(self, s: str | None) -> str | None:
         if not s:
             return s
@@ -2219,7 +2580,6 @@ class ServerReceiver:
             return match.group(0)
 
         return self._m_ch.sub(repl, content)
-    
 
     def _remap_role_mentions(self, content: str) -> str:
         """Map host role mentions to cloned role mentions using role_mappings."""
@@ -2228,7 +2588,7 @@ class ServerReceiver:
 
         def repl(match: re.Match) -> str:
             orig_role_id = int(match.group("id"))
-            row = self.db.get_role_mapping(orig_role_id) 
+            row = self.db.get_role_mapping(orig_role_id)
 
             if row and "cloned_role_id" in row.keys():
                 cloned_id = row["cloned_role_id"]
@@ -2238,7 +2598,6 @@ class ServerReceiver:
             return match.group(0)
 
         return self._m_role.sub(repl, content)
-
 
     def _build_webhook_payload(self, msg: Dict) -> dict:
         """
@@ -2318,11 +2677,19 @@ class ServerReceiver:
         if data.get("__buffered__"):
             parts.append("buffered")
         return f" [{' & '.join(parts)}]" if parts else ""
+    
+
 
     async def forward_message(self, msg: Dict):
         """
         Forwards a message to the appropriate channel webhook based on the channel mapping.
         Queues when mapping/sync unavailable, validates payload, and handles RL/retries.
+
+        Policy:
+        - If the PRIMARY webhook's name is unchanged (canonical), always include per-message user metadata.
+        - If the PRIMARY webhook's name is customized:
+            * When sending via the PRIMARY webhook → use the webhook's stored identity.
+            * When sending via a TEMP webhook → override per-message username/avatar_url to match PRIMARY.
         """
         if self._shutting_down:
             return
@@ -2331,140 +2698,98 @@ class ServerReceiver:
         source_id = msg["channel_id"]
         is_backfill = bool(msg.get("__backfill__"))
 
-        # Buffer live messages while backfill is running for this source channel
-        if self.backfill.is_backfilling(source_id) and not is_backfill:
-            msg["__buffered__"] = True
-            self._pending_msgs.setdefault(source_id, []).append(msg)
-            logger.debug(
-                "[⏳] Buffered live message during backfill for #%s", source_id
-            )
-            return
-
-        # ----- Lookup mapping early; bail if missing BEFORE any rotation logic -----
-        mapping = self.chan_map.get(source_id)
-        if mapping is None:
-            self._load_mappings()
-            mapping = self.chan_map.get(source_id)
-        if mapping is None:
-            async with self._warn_lock:
-                if source_id not in self._unmapped_warned:
-                    logger.info(
-                        "[⌛] No mapping yet for channel %s (%s); msg from %s is queued and will be sent after sync",
-                        msg["channel_name"],
-                        msg["channel_id"],
-                        msg["author"],
-                    )
-                    self._unmapped_warned.add(source_id)
-            msg["__buffered__"] = True
-            self._pending_msgs.setdefault(source_id, []).append(msg)
-            return
-
-        url = mapping.get("channel_webhook_url")
-        clone_id = mapping.get("cloned_channel_id") or mapping.get("clone_channel_id")
-
-        # ----- Stickers path: try cloned -> standard -> webhook image-embed fallback -----
-        stickers = msg.get("stickers") or []
-        if stickers:
-            guild = self.bot.get_guild(self.clone_guild_id)
-            ch = (
-                guild.get_channel(mapping["cloned_channel_id"])
-                if (guild and mapping)
-                else None
-            )
-
-            handled = await self.stickers.send_with_fallback(
-                receiver=self,
-                ch=ch,
-                stickers=stickers,
-                mapping=mapping,
-                msg=msg,
-                source_id=source_id,
-            )
-            if handled:
-                if is_backfill:
-                    self.backfill.note_sent(source_id)
-                    d, t = self.backfill.get_progress(source_id)
-                    suffix = f" [{d}/{t}]" if t else f" [{d}]"
-                    logger.info(
-                        "[💬]%s Forwarded (stickers) to #%s from %s (%s)%s",
-                        tag,
-                        msg["channel_name"],
-                        msg["author"],
-                        msg["author_id"],
-                        suffix,
-                    )
-                return
-
-        # ----- Recreate missing webhook if needed -----
-        if mapping and not url:
-            if self._sync_lock.locked():
-                logger.info(
-                    "[⌛] Sync in progress; message in #%s from %s is queued and will be sent after sync",
-                    msg["channel_name"],
-                    msg["author"],
-                )
-                msg["__buffered__"] = True
-                self._pending_msgs.setdefault(source_id, []).append(msg)
-                return
-
-            logger.warning(
-                "[⚠️] Mapped channel %s has no webhook; attempting to recreate",
-                msg["channel_name"],
-            )
-            url = await self._recreate_webhook(source_id)
-            if not url:
-                logger.info(
-                    "[⌛] Could not recreate webhook for #%s; queued message from %s",
-                    msg["channel_name"],
-                    msg["author"],
-                )
-                msg["__buffered__"] = True
-                self._pending_msgs.setdefault(source_id, []).append(msg)
-                return
-
-        # ----- Build and validate payload -----
+        # ----- Build payload up-front so both forced and normal paths can use it -----
         payload = self._build_webhook_payload(msg)
         if payload is None:
-            logger.debug(
-                "No webhook payload built for #%s; skipping", msg["channel_name"]
-            )
+            logger.debug("No webhook payload built for #%s; skipping", msg.get("channel_name"))
             return
-
         if not payload.get("content") and not payload.get("embeds"):
             logger.info(
                 "[⚠️]%s Skipping empty message in #%s (attachments=%d stickers=%d)",
                 tag,
-                msg["channel_name"],
+                msg.get("channel_name"),
                 len(msg.get("attachments") or []),
                 len(msg.get("stickers") or []),
             )
             return
-
         if payload.get("content"):
             try:
                 import json
-
                 json.dumps({"content": payload["content"]})
             except (TypeError, ValueError) as e:
                 logger.error(
                     "[⛔] Skipping message from #%s: content not JSON serializable: %s; content=%r",
-                    msg["channel_name"],
+                    msg.get("channel_name"),
                     e,
                     payload["content"],
                 )
                 return
 
         # ----------------------
-        # Sending helpers
+        # Helpers
         # ----------------------
         if not hasattr(self, "_webhooks"):
             self._webhooks = {}  # url -> Webhook
 
-        async def _do_send(url_to_use: str, rl_key: str):
+        async def _primary_name_changed(purl: str) -> bool:
+            """True iff PRIMARY webhook name differs from canonical default."""
+            try:
+                wid = int(purl.rstrip("/").split("/")[-2])
+                wh = await self.bot.fetch_webhook(wid)
+                canonical = self.backfill._canonical_temp_name()  # e.g., "Copycord"
+                name = (wh.name or "").strip()
+                return bool(name and name != canonical)
+            except Exception:
+                return False
+
+        async def _get_primary_identity_for_source(src_id: int) -> tuple[str | None, str | None, str | None]:
+            """
+            Returns (primary_url, name, avatar_url).
+            avatar_url is a CDN URL if available.
+            """
+            mapping = self.chan_map.get(src_id) or {}
+            purl = mapping.get("channel_webhook_url") or mapping.get("webhook_url")
+            if not purl:
+                return None, None, None
+            try:
+                wid = int(purl.rstrip("/").split("/")[-2])
+                wh = await self.bot.fetch_webhook(wid)
+                name = (wh.name or "").strip() or None
+                av_url = None
+                try:
+                    av_asset = getattr(wh, "avatar", None)
+                    if av_asset:
+                        # discord.py: Asset.url → str
+                        av_url = str(getattr(av_asset, "url", None)) or None
+                except Exception:
+                    av_url = None
+                return purl, name, av_url
+            except Exception:
+                return purl, None, None
+
+        async def _primary_name_changed_for_source(src_id: int) -> bool:
+            mapping = self.chan_map.get(src_id) or {}
+            purl = mapping.get("channel_webhook_url") or mapping.get("webhook_url")
+            if not purl:
+                return False
+            return await _primary_name_changed(purl)
+
+        async def _do_send(
+            url_to_use: str,
+            rl_key: str,
+            *,
+            use_webhook_identity: bool,
+            override_identity: dict | None = None
+        ):
+            """
+            - use_webhook_identity=True → do not pass username/avatar_url (use stored webhook identity).
+            - override_identity={"username": ..., "avatar_url": ...} → force those values on send.
+            (Takes precedence over use_webhook_identity.)
+            """
             if self._shutting_down:
                 return
             from aiohttp import ClientError
-            import aiohttp, asyncio  # ensure aiohttp is available here
+            import aiohttp, asyncio
 
             if self.session is None or self.session.closed:
                 self.session = aiohttp.ClientSession()
@@ -2475,38 +2800,45 @@ class ServerReceiver:
                 self._webhooks[url_to_use] = webhook
 
             await self.ratelimit.acquire(ActionType.WEBHOOK_MESSAGE, key=rl_key)
-
             if self._shutting_down:
                 return
+
+            # Decide identity to pass
+            if override_identity is not None:
+                kw_username = override_identity.get("username")
+                kw_avatar   = override_identity.get("avatar_url")
+            else:
+                kw_username = None if use_webhook_identity else payload.get("username")
+                kw_avatar   = None if use_webhook_identity else payload.get("avatar_url")
+
+            logger.debug(
+                "[send] use_webhook_identity=%s override=%s | src=%s | ch=%s | username=%r avatar_url=%r",
+                use_webhook_identity, bool(override_identity),
+                source_id, msg.get("channel_name"),
+                kw_username, kw_avatar,
+            )
 
             try:
                 await webhook.send(
                     content=payload.get("content"),
                     embeds=payload.get("embeds"),
-                    username=payload.get("username"),
-                    avatar_url=payload.get("avatar_url"),
+                    username=kw_username,
+                    avatar_url=kw_avatar,
                     wait=True,
                 )
-
                 if is_backfill:
                     self.backfill.note_sent(source_id)
-                    sent, total = self.backfill.get_progress(source_id)
-                    left = max(total - sent, 0)
+                    delivered, total = self.backfill.get_progress(source_id)
+                    suffix = f" [{max(total - delivered, 0)} left]" if total is not None else f" [{delivered} sent]"
                     logger.info(
-                        "[💬] [msg-sync] Forwarded message to #%s from %s (%s) [%d left]",
-                        msg["channel_name"],
-                        msg["author"],
-                        msg["author_id"],
-                        left,
+                        "[💬] [msg-sync] Forwarded message to #%s from %s (%s)%s",
+                        msg.get("channel_name"), msg.get("author"), msg.get("author_id"), suffix,
                     )
-                    # gentle relax after success
                     self.ratelimit.relax(ActionType.WEBHOOK_MESSAGE, key=rl_key)
                 else:
                     logger.info(
-                        "[💬] Forwarded message to #%s from %s (%s)",
-                        msg["channel_name"],
-                        msg["author"],
-                        msg["author_id"],
+                        "[💬]%s Forwarded message to #%s from %s (%s)",
+                        tag, msg.get("channel_name"), msg.get("author"), msg.get("author_id"),
                     )
 
             except HTTPException as e:
@@ -2515,118 +2847,126 @@ class ServerReceiver:
                     if retry_after is None:
                         try:
                             retry_after = float(
-                                getattr(e, "response", None).headers.get(
-                                    "X-RateLimit-Reset-After", 0
-                                )
+                                getattr(e, "response", None).headers.get("X-RateLimit-Reset-After", 0)
                             )
                         except Exception:
                             retry_after = 2.0
                     delay = max(0.0, float(retry_after))
                     logger.warning(
                         "[⏱️]%s 429 for #%s — sleeping %.2fs then retrying",
-                        tag,
-                        msg["channel_name"],
-                        delay,
+                        tag, msg.get("channel_name"), delay,
                     )
-
-                    self.ratelimit.penalize(ActionType.WEBHOOK_MESSAGE, key=rl_key)
-
-                    await self.ratelimit.acquire(ActionType.WEBHOOK_MESSAGE, key=rl_key)
-                    webhook2 = self._webhooks.get(url_to_use) or Webhook.from_url(
-                        url_to_use, session=self.session
-                    )
-                    if self._shutting_down:
-                        return
-                    await webhook2.send(
-                        content=payload.get("content"),
-                        embeds=payload.get("embeds"),
-                        username=payload.get("username"),
-                        avatar_url=payload.get("avatar_url"),
-                        wait=True,
-                    )
-                    if is_backfill:
-                        self.backfill.note_sent(source_id)
-                        sent, total = self.backfill.get_progress(source_id)
-                        left = max(total - sent, 0)
-                        logger.info(
-                            "[💬] [msg-sync] Forwarded message to #%s from %s (%s) (after 429 retry) [%d left]",
-                            msg["channel_name"],
-                            msg["author"],
-                            msg["author_id"],
-                            left,
-                        )
-                    else:
-                        logger.info(
-                            "[💬]%s Forwarded message to #%s from %s (%s) (after 429 retry)",
-                            tag,
-                            msg["channel_name"],
-                            msg["author"],
-                            msg["author_id"],
-                        )
-
+                    await asyncio.sleep(delay)
+                    # retry with the SAME identity decision/override
+                    await _do_send(url_to_use, rl_key, use_webhook_identity=use_webhook_identity, override_identity=override_identity)
+                    return
                 elif e.status == 404:
-                    logger.debug(
-                        "Webhook %s returned 404; attempting recreate...", url_to_use
-                    )
+                    logger.debug("Webhook %s returned 404; attempting recreate...", url_to_use)
                     new_url = await self._recreate_webhook(source_id)
                     if not new_url:
                         logger.warning(
                             "[⌛] No mapping for channel %s; msg from %s is queued and will be sent after sync",
-                            msg["channel_name"],
-                            msg["author"],
+                            msg.get("channel_name"), msg.get("author"),
                         )
                         msg["__buffered__"] = True
                         self._pending_msgs.setdefault(source_id, []).append(msg)
                         return
-
-                    await self.ratelimit.acquire(ActionType.WEBHOOK_MESSAGE, key=rl_key)
-                    webhook3 = self._webhooks.get(new_url) or Webhook.from_url(
-                        new_url, session=self.session
-                    )
-                    self._webhooks[new_url] = webhook3
-                    if self._shutting_down:
-                        return
-                    await webhook3.send(
-                        content=payload.get("content"),
-                        embeds=payload.get("embeds"),
-                        username=payload.get("username"),
-                        avatar_url=payload.get("avatar_url"),
-                        wait=True,
-                    )
-
-                    if is_backfill:
-                        self.backfill.note_sent(source_id)
-                        sent, total = self.backfill.get_progress(source_id)
-                        left = max(total - sent, 0)
-                        logger.info(
-                            "[💬] [msg-sync] Forwarded message to #%s from %s (%s) [%d left]",
-                            msg["channel_name"],
-                            msg["author"],
-                            msg["author_id"],
-                            left,
-                        )
-                    else:
-                        logger.info(
-                            "[💬]%s Forwarded message to #%s from %s (%s)",
-                            tag,
-                            msg["channel_name"],
-                            msg["author"],
-                            msg["author_id"],
-                        )
+                    await _do_send(new_url, rl_key, use_webhook_identity=use_webhook_identity, override_identity=override_identity)
+                    return
                 else:
-                    logger.error(
-                        "[⛔] Failed to send to #%s (status %s): %s",
-                        msg["channel_name"],
-                        e.status,
-                        e.text,
-                    )
+                    logger.error("[⛔] Failed to send to #%s (status %s): %s", msg.get("channel_name"), e.status, e.text)
             except (ClientError, asyncio.TimeoutError) as e:
-                # network issue → queue for later rather than drop
                 logger.warning(
                     "[🌐]%s Network error sending to #%s: %s — queued for retry",
-                    tag,
-                    msg["channel_name"],
-                    e,
+                    tag, msg.get("channel_name"), e,
+                )
+                msg["__buffered__"] = True
+                self._pending_msgs.setdefault(source_id, []).append(msg)
+                return
+
+        # ----------------------
+        # (A) Forced-url path — used by backfill rotation
+        # ----------------------
+        forced_url = msg.get("__force_webhook_url__")
+        if forced_url:
+            # Figure out primary info
+            primary_url, primary_name, primary_avatar_url = await _get_primary_identity_for_source(source_id)
+            primary_customized = await _primary_name_changed_for_source(source_id)
+            # If forced URL is the primary, use webhook identity when customized; otherwise override to match primary
+            is_primary = bool(primary_url and forced_url == primary_url)
+            use_webhook_identity = bool(primary_customized and is_primary)
+            override = None
+            if primary_customized and not is_primary:
+                override = {"username": primary_name, "avatar_url": primary_avatar_url}
+            rl_key = f"bf-forced:{msg.get('channel_id')}"
+            await _do_send(forced_url, rl_key, use_webhook_identity=use_webhook_identity, override_identity=override)
+            return
+
+        # ----------------------
+        # (B) Normal path
+        # ----------------------
+        # Buffer live messages while backfill is running for this source channel
+        if self.backfill.is_backfilling(source_id) and not is_backfill:
+            msg["__buffered__"] = True
+            self._pending_msgs.setdefault(source_id, []).append(msg)
+            logger.debug("[⏳] Buffered live message during backfill for #%s", source_id)
+            return
+
+        # Lookup mapping
+        mapping = self.chan_map.get(source_id)
+        if mapping is None:
+            self._load_mappings()
+            mapping = self.chan_map.get(source_id)
+        if mapping is None:
+            async with self._warn_lock:
+                if source_id not in self._unmapped_warned:
+                    logger.info(
+                        "[⌛] No mapping yet for channel %s (%s); msg from %s is queued and will be sent after sync",
+                        msg.get("channel_name"), msg.get("channel_id"), msg.get("author"),
+                    )
+                    self._unmapped_warned.add(source_id)
+            msg["__buffered__"] = True
+            self._pending_msgs.setdefault(source_id, []).append(msg)
+            return
+
+        url = mapping.get("channel_webhook_url") or mapping.get("webhook_url")
+        clone_id = mapping.get("cloned_channel_id") or mapping.get("clone_channel_id")
+
+        # Stickers early-exit (unchanged)
+        stickers = msg.get("stickers") or []
+        if stickers:
+            guild = self.bot.get_guild(self.clone_guild_id)
+            ch = (guild.get_channel(mapping["cloned_channel_id"]) if (guild and mapping) else None)
+            handled = await self.stickers.send_with_fallback(
+                receiver=self, ch=ch, stickers=stickers, mapping=mapping, msg=msg, source_id=source_id,
+            )
+            if handled:
+                if is_backfill:
+                    self.backfill.note_sent(source_id)
+                    d, t = self.backfill.get_progress(source_id)
+                    suffix = f" [{d}/{t}]" if t else f" [{d}]"
+                    logger.info(
+                        "[💬]%s Forwarded (stickers) to #%s from %s (%s)%s",
+                        tag, msg.get("channel_name"), msg.get("author"), msg.get("author_id"), suffix,
+                    )
+                return
+
+        # Recreate missing webhook if needed
+        if mapping and not url:
+            if self._sync_lock.locked():
+                logger.info(
+                    "[⌛] Sync in progress; message in #%s from %s is queued and will be sent after sync",
+                    msg.get("channel_name"), msg.get("author"),
+                )
+                msg["__buffered__"] = True
+                self._pending_msgs.setdefault(source_id, []).append(msg)
+                return
+            logger.warning("[⚠️] Mapped channel %s has no webhook; attempting to recreate", msg.get("channel_name"))
+            url = await self._recreate_webhook(source_id)
+            if not url:
+                logger.info(
+                    "[⌛] Could not recreate webhook for #%s; queued message from %s",
+                    msg.get("channel_name"), msg.get("author"),
                 )
                 msg["__buffered__"] = True
                 self._pending_msgs.setdefault(source_id, []).append(msg)
@@ -2637,36 +2977,143 @@ class ServerReceiver:
         # ----------------------
         if is_backfill and clone_id:
             await self.backfill.ensure_temps_ready(int(clone_id))
-            sem = self.backfill.semaphores.setdefault(
-                int(clone_id), asyncio.Semaphore(1)
-            )
-            async with sem:
-                url_to_use, _ = await self.backfill.pick_url_for_send(
-                    int(clone_id), url, create_missing=False
-                )
-                rl_key = f"channel:{clone_id}"  # aggregate RL for backfill
-                await _do_send(url_to_use, rl_key)
-            return
-        else:
-            # Always rotate live messages across existing webhooks (no creation)
-            if clone_id:
-                sem = self.backfill.semaphores.setdefault(
-                    int(clone_id), asyncio.Semaphore(1)
-                )
-                async with sem:
-                    url_to_use, _ = await self.backfill.pick_url_for_send(
-                        int(clone_id),
-                        url,
-                        create_missing=False,  # live never creates temps
-                    )
-                    rl_key = url_to_use  # per-webhook RL for live
-                    await _do_send(url_to_use, rl_key)
-                return
 
-            # Fallback: no clone_id → use primary webhook
-            url_to_use = url
-            rl_key = url_to_use
-            await _do_send(url_to_use, rl_key)
+            # Decide using PRIMARY state
+            primary_url, primary_name, primary_avatar_url = await _get_primary_identity_for_source(source_id)
+            primary_customized = await _primary_name_changed_for_source(source_id)
+
+            # Pick URL and send with correct identity behavior
+            sem = self.backfill.semaphores.setdefault(int(clone_id), asyncio.Semaphore(1))
+            async with sem:
+                url_to_use, _ = await self.backfill.pick_url_for_send(int(clone_id), url, create_missing=False)
+                rl_key = f"channel:{clone_id}"  # aggregate RL for backfill
+
+                if primary_customized:
+                    is_primary = bool(primary_url and url_to_use == primary_url)
+                    if is_primary:
+                        # Primary: use the webhook's stored identity
+                        await _do_send(url_to_use, rl_key, use_webhook_identity=True, override_identity=None)
+                    else:
+                        # Temp: override to look like the primary (no editing needed)
+                        override = {"username": primary_name, "avatar_url": primary_avatar_url}
+                        await _do_send(url_to_use, rl_key, use_webhook_identity=False, override_identity=override)
+                else:
+                    # Not customized → always include per-message user metadata
+                    await _do_send(url_to_use, rl_key, use_webhook_identity=False, override_identity=None)
+            return
+
+        # Fallback: no clone_id → use primary webhook directly
+        primary_customized = await _primary_name_changed_for_source(source_id)
+        url_to_use = url
+        rl_key = url_to_use
+        # If customized and using primary, let the webhook identity speak; else include user meta
+        await _do_send(url_to_use, rl_key, use_webhook_identity=primary_customized, override_identity=None)
+
+
+    async def _handle_backfill_message(self, data: dict) -> None:
+        if self._shutting_down:
+            return
+        try:
+            original_id = int(data["channel_id"])
+        except Exception:
+            logger.warning("[bf] bad channel_id in payload: %r", data.get("channel_id"))
+            return
+
+        # ---- resolve mapping (prefer original->clone, fallback clone->original) ----
+        row = None
+        if hasattr(self.db, "get_channel_mapping_by_original_id"):
+            row = self.db.get_channel_mapping_by_original_id(original_id)
+        if not row and hasattr(self.db, "get_channel_mapping_by_clone_id"):
+            # UI might have sent clone id by mistake
+            row = self.db.get_channel_mapping_by_clone_id(original_id)
+            if row:
+                try:
+                    original_id = int(row["original_channel_id"])
+                except Exception:
+                    pass
+
+        if not row:
+            logger.warning("[bf] no mapping for channel=%s; cannot rotate", original_id)
+            await self.forward_message(data)  # last resort: still forward once
+            return
+
+        # ---- normalize sqlite3.Row → dict ----
+        try:
+            row = dict(row)
+        except Exception:
+            logger.error(
+                "[bf] mapping row not dict-like: type=%r row=%r", type(row), row
+            )
+            await self.forward_message(data)
+            return
+
+        # ids/urls with fallbacks
+        clone_id = None
+        for k in ("cloned_channel_id", "clone_channel_id"):
+            v = row.get(k)
+            if v is not None:
+                try:
+                    clone_id = int(v)
+                    break
+                except Exception:
+                    pass
+
+        primary_url = None
+        for k in ("channel_webhook_url", "webhook_url", "webhook"):
+            v = row.get(k)
+            if v:
+                primary_url = v
+                break
+
+        if not primary_url:
+            logger.warning(
+                "[bf] mapping found but no webhook URL | original=%s clone=%s row=%s",
+                original_id,
+                clone_id,
+                row,
+            )
+            await self.forward_message(data)
+            return
+
+        # ---- ensure BackfillManager sink has the clone id (idempotent) ----
+        st = self.backfill._progress.get(int(original_id))
+        if not st:
+            self.backfill.register_sink(
+                original_id, user_id=None, clone_channel_id=clone_id, msg=None
+            )
+            logger.debug(
+                "[bf] sink registered | original=%s clone=%s", original_id, clone_id
+            )
+        else:
+            if clone_id and st.get("clone_channel_id") != clone_id:
+                st["clone_channel_id"] = clone_id
+            if clone_id:
+                self.backfill._by_clone[clone_id] = int(original_id)
+
+        # pre-warm temp hooks (no-op if ready)
+        try:
+            if clone_id:
+                await self.backfill.ensure_temps_ready(clone_id)
+        except Exception as e:
+            logger.debug(
+                "[bf] ensure_temps_ready failed | clone=%s err=%s", clone_id, e
+            )
+
+        # pick rotating URL (create_missing=True so pool exists)
+        try:
+            url, used_pool = await self.backfill.pick_url_for_send(
+                clone_channel_id=clone_id or 0,
+                primary_url=primary_url,
+                create_missing=True,
+            )
+        except Exception as e:
+            logger.warning("[bf] rotation failed, using primary | err=%s", e)
+            url = primary_url
+
+        # force the chosen URL into the normal forwarder
+        forced = dict(data)
+        forced["__force_webhook_url__"] = url
+        await self.forward_message(forced)
 
     async def _shutdown(self):
         """
@@ -2679,8 +3126,40 @@ class ServerReceiver:
         if getattr(self, "_shutting_down", False):
             return
         self._shutting_down = True
-
         logger.info("Shutting down server...")
+        if getattr(self, "_send_tasks", None):
+            # Cancel any in-progress message forwards
+            for t in list(self._send_tasks):
+                t.cancel()
+            await asyncio.gather(*self._send_tasks, return_exceptions=True)
+            self._send_tasks.clear()
+        with contextlib.suppress(Exception):
+            self.bus.begin_shutdown()
+        if getattr(self, "verify", None):
+            asyncio.create_task(self.verify.stop())
+        self.bus.begin_shutdown()
+        with contextlib.suppress(Exception, asyncio.TimeoutError):
+            await asyncio.wait_for(
+                self.bus.status(running=False, status="Stopped"), 0.4
+            )
+
+        for orig in list(getattr(self, "_active_backfills", set())):
+            try:
+                await self.bus.publish(
+                    "client",
+                    {
+                        "type": "backfill_cancelled",
+                        "data": {"channel_id": str(orig), "reason": "server_shutdown"},
+                    },
+                )
+            except Exception:
+                pass
+        self._active_backfills.clear()
+
+        bf = getattr(self, "backfill", None)
+        if bf and hasattr(bf, "cancel_all_active"):
+            # Cancel any in-progress backfills
+            await bf.cancel_all_active()
 
         try:
             ws = getattr(self, "ws_manager", None) or getattr(self, "ws", None)
@@ -2688,6 +3167,8 @@ class ServerReceiver:
                 await ws.stop()
         except Exception:
             logger.debug("[shutdown] ws stop failed", exc_info=True)
+        finally:
+            logging.info("Server shutdown complete.")
 
         async def _cancel_and_wait(task, name: str):
             if not task:
@@ -2736,7 +3217,7 @@ class ServerReceiver:
         the provided server token from the configuration. It ensures proper
         cleanup of resources and pending tasks during shutdown.
         """
-        logger.info("[✨] Starting Copycord Server %s", self.config.CURRENT_VERSION)
+        logger.info("[✨] Starting Copycord Server %s", CURRENT_VERSION)
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self._shutdown()))
@@ -2744,13 +3225,19 @@ class ServerReceiver:
         try:
             loop.run_until_complete(self.bot.start(self.config.SERVER_TOKEN))
         finally:
-            loop.run_until_complete(self._shutdown())
-
             pending = asyncio.all_tasks(loop=loop)
             for task in pending:
                 task.cancel()
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
 
+def _autostart_enabled() -> bool:
+    return os.getenv("COPYCORD_AUTOSTART", "true").lower() in ("1", "true", "yes", "on")
+
+
 if __name__ == "__main__":
-    ServerReceiver().run()
+    if _autostart_enabled():
+        ServerReceiver().run()
+    else:
+        while True:
+            time.sleep(3600)

@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 name: Build & publish Copycord containers
+=======
+name: Build & publish Copycord container
+>>>>>>> web-ui
 
 on:
   push:
@@ -33,6 +37,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./code                   
+<<<<<<< HEAD
           file: ./code/server/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
@@ -50,3 +55,11 @@ jobs:
           tags: |
             ghcr.io/${{ steps.vars.outputs.owner }}/copycord-client:${{ github.ref_name }}
             ghcr.io/${{ steps.vars.outputs.owner }}/copycord-client:latest
+=======
+          file: ./code/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:${{ github.ref_name }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:latest
+>>>>>>> web-ui

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en" class="boot">
+
+<head>
+  <meta charset="utf-8" />
+  <title>Channels · Copycord</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="{{ request.url_for('static', path='assets/main.css') }}">
+  <link rel="icon" type="image/png" href="/static/logo.png">
+</head>
+
+<body class="channels-page">
+  <header class="site-header" role="banner">
+    <button id="menu-toggle" class="menu-btn" aria-haspopup="true" aria-expanded="false" aria-controls="side-menu"
+      aria-label="Open menu">
+      <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+    </button>
+    <div class="header-left">
+      <img src="/static/logo.png" alt="Logo" class="header-logo">
+      <h1>Copycord</h1>
+    </div>
+  </header>
+
+  <div id="menu-backdrop" class="menu-backdrop" hidden></div>
+  <aside id="side-menu" class="side-menu" aria-hidden="true" aria-label="Site menu">
+    <div class="side-menu-header"></div>
+    <nav class="side-menu-body">
+      <ul class="menu-list">
+        <li><a class="menu-item" href="/" rel="noopener">Configuration</a></li>
+        <li><a class="menu-item is-active" href="/channels" rel="noopener">Channels</a></li>
+        <li><a class="menu-item is-active" href="/guilds" rel="noopener">Guilds</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <div class="container wide">
+    <div class="card">
+      <header class="card-titlebar">
+        <h2 class="card-title">Channels</h2>
+        <div class="titlebar-actions">
+          <input id="ch-search" class="input" type="text" placeholder="Search channels…" aria-label="Search channels">
+
+          <div class="select">
+            <select id="ch-filter" aria-label="Filter">
+              <option value="all">All channels</option>
+              <option value="orphans">Orphans only</option>
+              <option value="nonorphans">Non-orphans only</option>
+            </select>
+          </div>
+
+          <div class="select">
+            <select id="ch-sort" aria-label="Sort">
+              <option value="name">Name</option>
+              <option value="category">Category</option>
+              <option value="type">Type</option>
+            </select>
+          </div>
+
+          <button id="orph-delall" class="btn btn-ghost" type="button" disabled>
+            Delete all orphans
+          </button>
+        </div>
+      </header>
+
+
+      <div id="channels-root" class="ch-grid" aria-live="polite"></div>
+      <div id="channels-empty" class="muted" hidden>No channels found.</div>
+    </div>
+  </div>
+
+  <div id="ch-menu" class="ctxmenu" role="menu" hidden>
+    <button class="ctxmenu-item" id="ctx-backfill" data-action="clone" role="menuitem">
+      Clone messages
+    </button>
+  </div>
+
+  <div id="verify-backdrop" class="modal-backdrop verify-backdrop" hidden></div>
+  <div id="verify-dialog" class="modal verify-modal" role="dialog" aria-modal="true" aria-labelledby="verify-title"
+    hidden>
+    <div class="modal-card verify-card">
+      <header class="modal-head verify-head">
+        <h3 id="verify-title">Verify server structure</h3>
+        <button id="verify-close" class="icon-btn verify-close" aria-label="Close">✕</button>
+      </header>
+
+      <div class="modal-body verify-body">
+        <p class="muted" id="verify-status">Press “Fetch orphans” to scan.</p>
+
+        <section aria-labelledby="orph-cats-title" class="orph-section">
+          <h4 id="orph-cats-title">Orphan categories</h4>
+          <div id="orph-cats" class="orph-list" aria-live="polite"></div>
+        </section>
+
+        <section aria-labelledby="orph-chs-title" class="orph-section">
+          <h4 id="orph-chs-title">Orphan channels</h4>
+          <div id="orph-chs" class="orph-list" aria-live="polite"></div>
+        </section>
+      </div>
+
+      <footer class="modal-foot verify-foot">
+        <button id="verify-fetch" class="btn">Fetch orphans</button>
+        <div class="spacer"></div>
+        <button id="verify-delall" class="btn danger" disabled>Delete all</button>
+        <button id="verify-cancel" class="btn ghost">Close</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+  <div id="backfill-backdrop" class="modal-backdrop bf-backdrop" hidden></div>
+
+  <div id="backfill-dialog" class="modal bf-modal" role="dialog" aria-modal="true" aria-labelledby="bf-title" hidden>
+    <div class="modal-card bf-card">
+      <header class="modal-head bf-head">
+        <h3 id="bf-title">Backfill channel messages</h3>
+        <button id="bf-close" class="icon-btn verify-close" aria-label="Close">✕</button>
+      </header>
+
+      <div class="modal-body bf-body">
+        <form id="bf-form">
+          <fieldset class="field bf-field">
+            <legend>How far back?</legend>
+
+            <label class="radio">
+              <input type="radio" name="mode" value="all" checked>
+              All history
+            </label>
+
+            <label class="radio">
+              <input type="radio" name="mode" value="since">
+              Since date/time
+            </label>
+            <div class="indent">
+              <input class="input" type="date" id="bf-since" name="since" disabled>
+            </div>
+            <label class="radio">
+              <input type="radio" name="mode" value="between">
+              Between dates
+            </label>
+            <div class="indent bf-row-between">
+              <div class="bf-dual">
+                <label class="sr-only" for="bf-from">From</label>
+                <input class="input" type="date" id="bf-from" disabled>
+              </div>
+              <div class="bf-dual" style="margin-top:8px">
+                <label class="sr-only" for="bf-to">To</label>
+                <input class="input" type="date" id="bf-to" disabled>
+              </div>
+            </div>
+            <label class="radio">
+              <input type="radio" name="mode" value="last">
+              Last N messages
+            </label>
+            <div class="indent">
+              <input class="input" type="number" id="bf-lastn" name="lastn" min="1" step="1" placeholder="100" disabled>
+            </div>
+          </fieldset>
+
+
+          <div class="buttons">
+            <button type="submit" id="bf-start" class="btn danger">Start</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="modal" aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-header">
+        <h4 id="confirm-title" class="modal-title">Confirm</h4>
+        <button type="button" id="confirm-close" class="icon-btn verify-close" aria-label="Close">✕</button>
+      </div>
+      <div class="p-4" id="confirm-body" style="padding:12px 16px; color:#e6e1ff;">
+        Are you sure?
+      </div>
+      <div class="btns" style="padding: 0 16px 16px 16px;">
+        <button type="button" id="confirm-okay" class="btn btn-ghost">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <footer id="fixed-footer" role="contentinfo" aria-label="Site footer">
+    <div class="footer-bar">
+      <span class="footer-brand" aria-label="Copycord version {{ version or 'dev' }}">
+        <span class="brand-name">Copycord</span>
+        <span class="brand-sep" aria-hidden="true"></span>
+        <bdi class="brand-version">
+          {% if version %}
+          <a href="https://github.com/Copycord/Copycord/releases/tag/{{ version }}" target="_blank" rel="noopener"
+            class="footer-link">
+            {{ version }}
+          </a>
+          {% else %}
+          dev
+          {% endif %}
+        </bdi>
+      </span>
+
+      <div class="footer-links" role="group" aria-label="Links">
+        <a class="footer-link" href="https://github.com/Copycord/Copycord" target="_blank" rel="noopener"
+          aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path
+              d="M12,2A10,10 0 0,0 2,12c0,4.42 2.87,8.16 6.84,9.49.5.09.68-.22.68-.48 0-.24-.01-.87-.01-1.71-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1.01.07 1.54 1.04 1.54 1.04.9 1.53 2.36 1.09 2.94.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02A9.56 9.56 0 0 1 12 6.8c.85 0 1.71.11 2.51.33 1.9-1.29 2.74-1.02 2.74-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.95.36.31.68.92.68 1.85 0 1.34-.01 2.42-.01 2.75 0 .26.18.58.69.48A10 10 0 0 0 22 12 10 10 0 0 0 12 2Z" />
+          </svg>
+        </a>
+
+        <a class="footer-link" href="https://discord.gg/ArFdqrJHBj" target="_blank" rel="noopener"
+          aria-label="Join our Discord">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" width="20" height="20">
+            <path
+              d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.375-.4447.8648-.6083 1.2495-1.8447-.2762-3.6804-.2762-5.4868 0-.1636-.3933-.4058-.8745-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9279 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.198.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9565-2.4189 2.157-2.4189 1.2108 0 2.175.1 2.1569 2.4188 0 1.3333-.9565 2.4191-2.157 2.4191zm7.9748 0c-1.183 0-2.157-1.0857-2.157-2.419 0-1.3332.957-2.4189 2.157-2.4189 1.2108 0 2.175.1 2.157 2.4188 0 1.3333-.9462 2.4191-2.157 2.4191Z" />
+          </svg>
+        </a>
+
+        <a class="footer-link" href="https://buymeacoffee.com/xmacj" target="_blank" rel="noopener"
+          aria-label="Buy me a coffee">
+          <img src="https://cdn.buymeacoffee.com/buttons/bmc-new-btn-logo.svg" alt="" width="18" height="18"
+            loading="lazy" />
+        </a>
+      </div>
+    </div>
+  </footer>
+
+  <script type="module" src="{{ request.url_for('static', path='assets/main.js') }}"></script>
+</body>
+
+</html>

@@ -9,12 +9,19 @@
 
 import asyncio
 import contextlib
+<<<<<<< HEAD
+=======
+import json
+>>>>>>> web-ui
 import re
 import signal
 import unicodedata
 from datetime import datetime, timezone
 import logging
+<<<<<<< HEAD
 from logging.handlers import RotatingFileHandler
+=======
+>>>>>>> web-ui
 from typing import Optional
 import discord
 from discord import ChannelType, MessageType
@@ -22,6 +29,7 @@ from discord.errors import Forbidden, HTTPException
 import os
 import sys
 from discord.ext import commands
+<<<<<<< HEAD
 from common.config import Config
 from common.db import DBManager
 from client.sitemap import SitemapService
@@ -29,6 +37,15 @@ from client.message_utils import MessageUtils
 from common.websockets import WebsocketManager
 from client.scraper import MemberScraper
 from client.scraper import StreamManager
+=======
+from common.config import Config, CURRENT_VERSION
+from common.db import DBManager
+from client.sitemap import SitemapService
+from client.message_utils import MessageUtils
+from common.websockets import WebsocketManager, AdminBus
+from client.scraper import MemberScraper
+from client.helpers import ClientUiController
+>>>>>>> web-ui
 
 
 LOG_DIR = "/data"
@@ -50,6 +67,7 @@ ch.setFormatter(formatter)
 ch.setLevel(LEVEL)
 root.addHandler(ch)
 
+<<<<<<< HEAD
 log_file = os.path.join(LOG_DIR, "client.log")
 fh = RotatingFileHandler(
     log_file,
@@ -61,6 +79,8 @@ fh.setFormatter(formatter)
 fh.setLevel(LEVEL)
 root.addHandler(fh)
 
+=======
+>>>>>>> web-ui
 # keep library noise down
 for name in ("websockets.server", "websockets.protocol"):
     logging.getLogger(name).setLevel(logging.WARNING)
@@ -94,10 +114,17 @@ class ClientListener:
         self._m_user = re.compile(r"<@!?(\d+)>")
         self.scraper = getattr(self, "scraper", None)
         self._scrape_lock = getattr(self, "_scrape_lock", asyncio.Lock())
+<<<<<<< HEAD
         self.streams = getattr(self, "streams", StreamManager(logger))
         self._scrape_task: asyncio.Task | None = None
         self._last_cancel_at: float | None = None
         self._cancelling: bool = False
+=======
+        self._last_cancel_at: float | None = None
+        self._cancelling: bool = False
+        self._scrape_task = None
+        self._scrape_gid = None
+>>>>>>> web-ui
         self.do_precount = True
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
@@ -110,6 +137,15 @@ class ClientListener:
         self.bot.event(self.on_guild_role_create)
         self.bot.event(self.on_guild_role_delete)
         self.bot.event(self.on_guild_role_update)
+<<<<<<< HEAD
+=======
+        self.bot.event(self.on_guild_join)
+        self.bot.event(self.on_guild_remove)
+        self.bot.event(self.on_guild_update)
+        self.bus = AdminBus(
+            role="client", logger=logger, admin_ws_url=self.config.ADMIN_WS_URL
+        )
+>>>>>>> web-ui
         self.ws = WebsocketManager(
             send_url=self.config.SERVER_WS_URL,
             listen_host=self.config.CLIENT_WS_HOST,
@@ -124,6 +160,17 @@ class ClientListener:
             host_guild_id=self.host_guild_id,
             logger=logger,
         )
+<<<<<<< HEAD
+=======
+        self.ui_controller = ClientUiController(
+            bus=self.bus,
+            admin_base_url=self.config.ADMIN_WS_URL,
+            bot=self.bot,
+            guild_id=self.host_guild_id,
+            listener=self,
+            logger=logging.getLogger("client.ui"),
+        )
+>>>>>>> web-ui
 
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -162,10 +209,54 @@ class ClientListener:
                     "client_start_time": self.start_time.isoformat(),
                 },
             }
+<<<<<<< HEAD
 
         elif typ == "clone_messages":
             chan_id = int(data.get("channel_id"))
             asyncio.create_task(self._backfill_channel(chan_id))
+=======
+        elif typ == "filters_reload":
+            self.config._load_filters_from_db()
+            logger.info("[⚙️] Filters reloaded from DB")
+            # let SitemapService take the new sets into account
+            try:
+                self.sitemap.reload_filters_and_resend()
+            except AttributeError:
+                asyncio.create_task(self.sitemap.build_and_send())
+
+            return {"ok": True, "note": "filters reloaded"}
+
+        elif typ == "clone_messages":
+            chan_id = int(data.get("channel_id"))
+            rng  = (data.get("range") or {}) if isinstance(data, dict) else {}
+            mode = (data.get("mode") or rng.get("mode") or "").lower()
+
+            after_iso = (
+                data.get("after_iso")
+                or data.get("since")
+                or (rng.get("value") if mode == "since" else None)
+            )
+
+            # NEW: upper bound
+            before_iso = (
+                data.get("before_iso")
+                or (rng.get("before") if mode in ("between", "range") else None)
+                or data.get("until")
+            )
+
+            _n = data.get("last_n") or (rng.get("value") if mode in ("last", "last_n") else None)
+            try:
+                last_n = int(_n) if _n is not None else None
+            except Exception:
+                last_n = None
+
+            asyncio.create_task(self._backfill_channel(
+                chan_id,
+                after_iso=after_iso,
+                before_iso=before_iso,   # NEW
+                last_n=last_n,
+            ))
+>>>>>>> web-ui
             return {"ok": True}
 
         elif typ == "sitemap_request":
@@ -177,7 +268,17 @@ class ClientListener:
                 return {"ok": False, "error": "Cloning is disabled"}
 
         elif typ == "scrape_members":
+<<<<<<< HEAD
             include_names = bool(data.get("include_names", True))
+=======
+            data = data or {}
+
+            inc_username   = bool(data.get("include_username", False))
+            inc_avatar_url = bool(data.get("include_avatar_url", False))
+            inc_bio        = bool(data.get("include_bio", False))
+            gid            = str(data.get("guild_id") or "")     # echo back to UI so it can highlight the right card
+            self._scrape_gid = gid
+>>>>>>> web-ui
 
             def clamp(v, lo, hi):
                 return max(lo, min(hi, v))
@@ -192,7 +293,19 @@ class ClientListener:
             if mpps is None:
                 mpps = clamp(8 // ns, 1, 5)
             else:
+<<<<<<< HEAD
                 mpps = clamp(int(mpps), 1, 5)
+=======
+                try:
+                    mpps = clamp(int(mpps), 1, 5)
+                except Exception:
+                    mpps = 1
+
+            # Helper to make sure we never emit an empty error string
+            def _err_msg(e: BaseException) -> str:
+                msg = str(e).strip()
+                return msg or type(e).__name__
+>>>>>>> web-ui
 
             try:
                 if self.scraper is None:
@@ -200,6 +313,7 @@ class ClientListener:
 
                 async with self._scrape_lock:
                     if self._scrape_task and not self._scrape_task.done():
+<<<<<<< HEAD
                         logger.debug("[scrape] REJECT: already-running task")
                         return {"ok": False, "error": "scrape-already-running"}
 
@@ -268,6 +382,207 @@ class ClientListener:
                 )
             except Exception as e:
                 logger.exception("[❌] scrape_snapshot failed")
+=======
+                        # another scrape is still running
+                        return {"ok": False, "error": "scrape-already-running"}
+
+                    # Announce start (include options for observability)
+                    try:
+                        await self.bus.publish(
+                            kind="client",
+                            payload={
+                                "type": "scrape_started",
+                                "data": {
+                                    "guild_id": gid,
+                                    "options": {
+                                        "include_username": inc_username,
+                                        "include_avatar_url": inc_avatar_url,
+                                        "include_bio": inc_bio,
+                                        "num_sessions": ns,
+                                        "max_parallel_per_session": mpps,
+                                    },
+                                },
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    target_gid = int(gid) if gid else None
+                except Exception:
+                    target_gid = None
+
+                # Launch the scrape task (do NOT await here)
+                self._scrape_task = asyncio.create_task(
+                    self.scraper.scrape(
+                        guild_id=target_gid,
+                        include_username=inc_username,
+                        include_avatar_url=inc_avatar_url,
+                        include_bio=inc_bio,
+                        num_sessions=ns,
+                        max_parallel_per_session=mpps,
+                    ),
+                    name="scrape",
+                )
+
+                async def _finish_scrape():
+                    try:
+                        result = await self._scrape_task
+                        count = len((result or {}).get("members", []))
+                        logger.debug("[scrape] TASK_DONE count=%d", count)
+
+                        # ---- Persist to /data/scrapes ----
+                        import os, json, datetime as _dt
+
+                        scrapes_dir = "/data/scrapes"
+                        os.makedirs(scrapes_dir, exist_ok=True)
+
+                        rgid  = str((result or {}).get("guild_id") or gid or "unknown")
+                        gname = (result or {}).get("guild_name", "guild")
+                        slug  = "".join(ch if ch.isalnum() else "_" for ch in gname).strip("_")
+                        while "__" in slug:
+                            slug = slug.replace("__", "_")
+
+                        ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+                        outfile = os.path.join(scrapes_dir, f"{slug}_{rgid}_{ts}.json")
+
+                        with open(outfile, "w", encoding="utf-8") as f:
+                            json.dump(result or {}, f, ensure_ascii=False, indent=2)
+
+                        # Tell UI we're done
+                        try:
+                            await self.bus.publish(
+                                kind="client",
+                                payload={
+                                    "type": "scrape_done",
+                                    "data": {
+                                        "guild_id": rgid,
+                                        "count": count,
+                                        "path": outfile,
+                                        "filename": os.path.basename(outfile),
+                                    },
+                                },
+                            )
+                        except Exception:
+                            pass
+
+                    except asyncio.CancelledError:
+                        # Write a partial snapshot on cancel
+                        import os, json, datetime as _dt
+
+                        snap = await self.scraper.snapshot_members()
+                        try:
+                            rgid = str(self._scrape_gid or gid or self.host_guild_id or "unknown")
+                            try:
+                                g = self.bot.get_guild(int(rgid))
+                            except Exception:
+                                g = None
+                            gname = g.name if g else "guild"
+
+                            scrapes_dir = "/data/scrapes"
+                            os.makedirs(scrapes_dir, exist_ok=True)
+
+                            slug = "".join(ch if ch.isalnum() else "_" for ch in gname).strip("_")
+                            while "__" in slug:
+                                slug = slug.replace("__", "_")
+
+                            ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+                            outfile = os.path.join(scrapes_dir, f"{slug}_{rgid}_{ts}.json")
+
+                            with open(outfile, "w", encoding="utf-8") as f:
+                                json.dump(
+                                    {"members": snap, "count": len(snap), "guild_id": rgid, "guild_name": gname},
+                                    f,
+                                    ensure_ascii=False,
+                                    indent=2,
+                                )
+
+                            await self.bus.publish(
+                                kind="client",
+                                payload={
+                                    "type": "scrape_done",
+                                    "data": {
+                                        "guild_id": rgid,
+                                        "count": len(snap),
+                                        "path": outfile,
+                                        "filename": os.path.basename(outfile),
+                                        "partial": True,
+                                    },
+                                },
+                            )
+                        except Exception:
+                            # If writing or publishing fails, still tell the UI it was cancelled
+                            try:
+                                await self.bus.publish(
+                                    kind="client",
+                                    payload={"type": "scrape_cancelled", "data": {"guild_id": self._scrape_gid or gid}},
+                                )
+                            except Exception:
+                                pass
+
+                    except BaseException as e:
+                        logger.exception("[❌] OP8 scrape failed: %r", e)
+                        try:
+                            await self.bus.publish(
+                                kind="client",
+                                payload={"type": "scrape_failed", "data": {"guild_id": gid, "error": _err_msg(e)}},
+                            )
+                        except Exception:
+                            pass
+                    finally:
+                        self._scrape_task = None
+                        self._scrape_gid = None
+
+                # Detach the follow-up work
+                asyncio.create_task(_finish_scrape())
+
+                # Immediate response to HTTP caller (no long await)
+                return {"ok": True, "accepted": True, "guild_id": gid}
+
+            except BaseException as e:
+                logger.exception("[❌] OP8 scrape failed (outer): %r", e)
+                try:
+                    await self.bus.publish(
+                        kind="client",
+                        payload={"type": "scrape_failed", "data": {"guild_id": gid, "error": _err_msg(e)}},
+                    )
+                except Exception:
+                    pass
+                return {"ok": False, "error": _err_msg(e)}
+
+        elif typ == "scrape_status":
+            # Are we currently scraping?
+            running = bool(self._scrape_task and not self._scrape_task.done())
+            return {"ok": True, "running": running, "guild_id": self._scrape_gid}
+
+        elif typ == "scrape_cancel":
+            req_gid = str((data or {}).get("guild_id") or "")
+            is_running = bool(self._scrape_task and not self._scrape_task.done())
+            if not is_running:
+                return {"ok": False, "error": "no-scrape-running"}
+
+            try:
+                if self.scraper:
+                    self.scraper.request_cancel()
+                # Nudge the running task so the CancelledError path triggers promptly
+                try:
+                    self._scrape_task.cancel()
+                except Exception:
+                    pass
+
+                # Tell UI immediately so the card resets; the CancelledError handler
+                # will later publish `scrape_done` with partial: true after writing the file.
+                try:
+                    await self.bus.publish(
+                        kind="client",
+                        payload={"type": "scrape_cancelled", "data": {"guild_id": self._scrape_gid or req_gid}}
+                    )
+                except Exception:
+                    pass
+                return {"ok": True, "cancelling": True}
+            except Exception as e:
+                logger.exception("[scrape_cancel] failed: %r", e)
+>>>>>>> web-ui
                 return {"ok": False, "error": str(e)}
 
         return None
@@ -371,7 +686,16 @@ class ClientListener:
             )
             sys.exit(1)
         asyncio.create_task(self.config.setup_release_watcher(self, should_dm=False))
+<<<<<<< HEAD
         logger.info("[🤖] Logged in as %s in guild %s", self.bot.user, host_guild.name)
+=======
+        msg = f"Logged in as {self.bot.user.display_name} in {host_guild.name}"
+        self.ui_controller.start() # Start UI Listener
+        await self.bus.status(
+            running=True, status=msg, discord={"ready": True}
+        )
+        logger.info("[🤖] %s", msg)
+>>>>>>> web-ui
         if self.config.ENABLE_CLONING:
             if self._sync_task is None:
                 self._sync_task = asyncio.create_task(self.periodic_sync_loop())
@@ -379,6 +703,10 @@ class ClientListener:
             logger.info("[🔕] Server cloning is disabled...")
         if self._ws_task is None:
             self._ws_task = asyncio.create_task(self.ws.start_server(self._on_ws))
+<<<<<<< HEAD
+=======
+        asyncio.create_task(self._snapshot_all_guilds_once())
+>>>>>>> web-ui
 
     def _rebuild_blocklist(self, keywords: list[str] | None = None) -> None:
         if keywords is None:
@@ -719,8 +1047,11 @@ class ClientListener:
                     getattr(before, "id", None),
                 )
                 return
+<<<<<<< HEAD
 
             # Only resync if name or parent category changed
+=======
+>>>>>>> web-ui
             name_changed = before.name != after.name
             parent_before = getattr(before, "category_id", None)
             parent_after = getattr(after, "category_id", None)
@@ -769,6 +1100,32 @@ class ClientListener:
             "[roles] update: %s (%d) → scheduling sitemap", after.name, after.id
         )
         self.schedule_sync()
+<<<<<<< HEAD
+=======
+        
+    async def on_guild_join(self, guild: discord.Guild):
+        try:
+            row = self._guild_row_from_obj(guild)
+            self.db.upsert_guild(**row)
+            logger.debug("[guilds] join → upsert %s (%s)", guild.name, guild.id)
+        except Exception:
+            logger.exception("[guilds] on_guild_join failed")
+
+    async def on_guild_remove(self, guild: discord.Guild):
+        try:
+            self.db.delete_guild(guild.id)
+            logger.debug("[guilds] remove → delete %s", guild.id)
+        except Exception:
+            logger.exception("[guilds] on_guild_remove failed")
+
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
+        try:
+            row = self._guild_row_from_obj(after)
+            self.db.upsert_guild(**row)
+            logger.debug("[guilds] update → upsert %s (%s)", after.name, after.id)
+        except Exception:
+            logger.exception("[guilds] on_guild_update failed")
+>>>>>>> web-ui
 
     async def on_member_join(self, member: discord.Member):
         try:
@@ -804,6 +1161,7 @@ class ClientListener:
         except Exception:
             logger.exception("Failed to forward member_joined")
 
+<<<<<<< HEAD
     async def _backfill_channel(self, original_channel_id: int):
         """Grab all human/bot messages from a channel and send to server"""
         await self.ws.send(
@@ -817,11 +1175,93 @@ class ClientListener:
                 {"type": "backfill_done", "data": {"channel_id": original_channel_id}}
             )
             return
+=======
+    async def _backfill_channel(
+        self,
+        original_channel_id: int,
+        *,
+        after_iso: str | None = None,
+        before_iso: str | None = None,
+        last_n: int | None = None,
+    ):
+        import asyncio
+        import os
+        from datetime import datetime, timezone
+        
+        def _coerce_int(x):
+            try:
+                return int(x)
+            except Exception:
+                return None
+        try:
+            from zoneinfo import ZoneInfo  # py>=3.9
+            _DEFAULT_UI_TZ = os.getenv("UI_TZ", "America/New_York")
+            LOCAL_TZ = ZoneInfo(_DEFAULT_UI_TZ)
+        except Exception:
+            LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
+
+        def _parse_iso(s: str | None) -> datetime | None:
+            if not s: return None
+            try:
+                dt = datetime.fromisoformat(s)
+            except Exception:
+                try: dt = datetime.fromisoformat(s + ":00")
+                except Exception: return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+
+        after_dt  = _parse_iso(after_iso)
+        before_dt = _parse_iso(before_iso)
+
+        mode = (
+            "last_n" if _coerce_int(last_n)
+            else ("between" if (after_iso and before_iso)
+                else ("since" if after_iso else "all"))
+        )
+
+        logger.debug(
+            "[backfill] INIT | channel=%s mode=%s after_iso=%r before_iso=%r last_n=%r",
+            original_channel_id, mode, after_iso, before_iso, last_n
+        )
+
+        loop = asyncio.get_event_loop()
+        t0 = loop.time()
+        sent = 0
+        skipped = 0
+        last_ping = 0.0
+        last_log = 0.0
+        PROGRESS_EVERY = 50
+        LOG_EVERY_SEC = 5.0
+
+        await self.ws.send({
+            "type": "backfill_started",
+            "data": {
+                "channel_id": original_channel_id,
+                "range": {"after": after_iso, "before": before_iso, "last_n": last_n},
+            },
+        })
+
+        guild = self.bot.get_guild(self.host_guild_id)
+        if not guild:
+            logger.error("[backfill] ⛔ host guild missing | guild_id=%s", self.host_guild_id)
+            try:
+                await self.ws.send({"type": "backfill_progress",
+                                    "data": {"channel_id": original_channel_id, "sent": sent}})
+            finally:
+                await self.ws.send({"type": "backfill_stream_end",
+                                    "data": {"channel_id": original_channel_id}})
+            return
+        logger.debug("[backfill] guild OK | id=%s name=%s", getattr(guild, "id", None), getattr(guild, "name", None))
+>>>>>>> web-ui
 
         ch = guild.get_channel(original_channel_id)
         if not ch:
             try:
                 ch = await self.bot.fetch_channel(original_channel_id)
+<<<<<<< HEAD
             except Exception as e:
                 logger.error("[⛔] Cannot fetch channel %s: %s", original_channel_id, e)
                 await self.ws.send(
@@ -833,19 +1273,52 @@ class ClientListener:
                 return
 
         # ----- filter: only human/bot messages, exclude all system messages -----
+=======
+                logger.debug("[backfill] channel fetched | id=%s name=%s type=%s",
+                            getattr(ch, "id", None), getattr(ch, "name", None),
+                            getattr(getattr(ch, "type", None), "value", None))
+            except Exception as e:
+                logger.error("[backfill] ⛔ cannot fetch channel | id=%s err=%s", original_channel_id, e)
+                try:
+                    await self.ws.send({"type": "backfill_progress",
+                                        "data": {"channel_id": original_channel_id, "sent": sent}})
+                finally:
+                    await self.ws.send({"type": "backfill_stream_end",
+                                        "data": {"channel_id": original_channel_id}})
+                return
+        else:
+            logger.debug("[backfill] channel OK | id=%s name=%s type=%s",
+                        getattr(ch, "id", None), getattr(ch, "name", None),
+                        getattr(getattr(ch, "type", None), "value", None))
+
+        if getattr(getattr(ch, "guild", None), "id", None) != self.host_guild_id:
+            logger.warning(
+                "[backfill] channel is not in host guild | got_guild=%s expected=%s (was a clone id passed?)",
+                getattr(getattr(ch, "guild", None), "id", None), self.host_guild_id
+            )
+
+>>>>>>> web-ui
         ALLOWED_TYPES = {MessageType.default}
         for _name in ("reply", "application_command", "context_menu_command"):
             _t = getattr(MessageType, _name, None)
             if _t is not None:
                 ALLOWED_TYPES.add(_t)
+<<<<<<< HEAD
 
         def _is_normal(msg) -> bool:
             # skip if Discord flags it as system
+=======
+        logger.debug("[backfill] allowed message types: %s",
+                    sorted(getattr(t, "value", str(t)) for t in ALLOWED_TYPES))
+
+        def _is_normal(msg) -> bool:
+>>>>>>> web-ui
             try:
                 if callable(getattr(msg, "is_system", None)) and msg.is_system():
                     return False
             except Exception:
                 pass
+<<<<<<< HEAD
             # skip if author is a system user
             if getattr(getattr(msg, "author", None), "system", False):
                 return False
@@ -873,10 +1346,35 @@ class ClientListener:
             async for m in ch.history(limit=None, oldest_first=True):
                 if not _is_normal(m):
                     continue
+=======
+            if getattr(getattr(msg, "author", None), "system", False):
+                return False
+            if getattr(msg, "type", None) not in ALLOWED_TYPES:
+                return False
+            return True
+        
+        if after_iso and after_dt:
+            logger.debug("[backfill] since filter parsed | utc=%s", after_dt.isoformat())
+        elif after_iso and not after_dt:
+            logger.warning("[backfill] since filter parse failed | after_iso=%r (ignoring)", after_iso)
+
+        if before_iso and before_dt:
+            logger.debug("[backfill] before filter parsed | utc=%s", before_dt.isoformat())
+        elif before_iso and not before_dt:
+            logger.warning("[backfill] before filter parse failed | before_iso=%r (ignoring)", before_iso)
+            
+        try:
+            async def emit_msg(m):
+                nonlocal sent, skipped, last_ping, last_log
+                if not _is_normal(m):
+                    skipped += 1
+                    return
+>>>>>>> web-ui
 
                 raw = m.content or ""
                 system = getattr(m, "system_content", "") or ""
                 content = system if (not raw and system) else raw
+<<<<<<< HEAD
                 author = "System" if (not raw and system) else m.author.name
 
                 # Embeds & mentions
@@ -940,12 +1438,159 @@ class ClientListener:
                 {"type": "backfill_done", "data": {"channel_id": original_channel_id}}
             )
 
+=======
+                author = "System" if (not raw and system) else getattr(m.author, "name", "Unknown")
+
+                raw_embeds = [e.to_dict() for e in m.embeds]
+                mention_map = await self.msg.build_mention_map(m, raw_embeds)
+                embeds = [self.msg.sanitize_embed_dict(e, m, mention_map) for e in raw_embeds]
+                content = self.msg.sanitize_inline(content, m, mention_map)
+                stickers_payload = self.msg.stickers_payload(getattr(m, "stickers", []))
+
+                await self.ws.send({
+                    "type": "message",
+                    "data": {
+                        "channel_id": m.channel.id,
+                        "channel_name": getattr(m.channel, "name", None),
+                        "channel_type": getattr(m.channel, "type", None).value if getattr(m.channel, "type", None) else None,
+                        "author": author,
+                        "author_id": getattr(m, "author", None) and getattr(m.author, "id", None),
+                        "avatar_url": (str(m.author.display_avatar.url)
+                                    if getattr(m.author, "display_avatar", None) else None),
+                        "content": content,
+                        "embeds": embeds,
+                        "attachments": [{"url": a.url, "filename": a.filename, "size": a.size} for a in m.attachments],
+                        "stickers": stickers_payload,
+                        "__backfill__": True,
+                    },
+                })
+                sent += 1
+                await asyncio.sleep(2)
+
+                now = loop.time()
+                if sent % PROGRESS_EVERY == 0 or (now - last_ping) >= 2.0:
+                    await self.ws.send({"type": "backfill_progress",
+                                        "data": {"channel_id": original_channel_id, "sent": sent}})
+                    last_ping = now
+
+                if (now - last_log) >= LOG_EVERY_SEC:
+                    dt = now - t0
+                    rate = (sent / dt) if dt > 0 else 0.0
+                    logger.debug("[backfill] progress | channel=%s sent=%d skipped=%d rate=%.1f msg/s",
+                                original_channel_id, sent, skipped, rate)
+                    last_log = now
+
+            n = _coerce_int(last_n)
+
+            if n and n > 0:
+                # ---------- LAST N: fetch, compute true total, announce, then emit ----------
+                buf = []
+                logger.debug(
+                    "[backfill] mode=last_n | n=%d %s",
+                    n, f"(after {after_dt.isoformat()})" if after_dt else "(no since bound)"
+                )
+                async for m in ch.history(limit=n, oldest_first=False, after=after_dt, before=before_dt):
+                    buf.append(m)
+                # True total = only messages we will actually emit
+                total = sum(1 for m in buf if _is_normal(m))
+                logger.debug("[backfill] fetched buffer | size=%d, total_normal=%d", len(buf), total)
+
+                # Announce actual total so server can count DOWN correctly
+                await self.ws.send({"type": "backfill_progress",
+                                    "data": {"channel_id": original_channel_id, "total": total}})
+
+                for m in reversed(buf):
+                    await emit_msg(m)
+
+            else:
+                # ---------- ALL/SINCE: pre-buffer to know true total, announce, then emit ----------
+                logger.debug(
+                    "[backfill] mode=%s | streaming oldest→newest%s",
+                    "since" if after_dt else "all",
+                    f" (after {after_dt.isoformat()})" if after_dt else ""
+                )
+                buf = [m async for m in ch.history(limit=None, oldest_first=True, after=after_dt, before=before_dt)]
+                total = sum(1 for m in buf if _is_normal(m))
+                logger.debug("[backfill] pre-count complete | fetched=%d total_normal=%d", len(buf), total)
+
+                await self.ws.send({"type": "backfill_progress",
+                                    "data": {"channel_id": original_channel_id, "total": total}})
+
+                for m in buf:
+                    await emit_msg(m)
+
+        except Forbidden as e:
+            logger.debug("[backfill] history forbidden | channel=%s err=%s", original_channel_id, e)
+        except HTTPException as e:
+            logger.warning("[backfill] HTTP error | channel=%s err=%s", original_channel_id, e)
+        except Exception as e:
+            logger.exception("[backfill] unexpected error | channel=%s err=%s", original_channel_id, e)
+        finally:
+            try:
+                await self.ws.send({"type": "backfill_progress",
+                                    "data": {"channel_id": original_channel_id, "sent": sent}})
+            except Exception:
+                pass
+
+            dur = loop.time() - t0
+            logger.debug("[backfill] STREAM END | channel=%s mode=%s sent=%d skipped=%d dur=%.1fs",
+                        original_channel_id, mode, sent, skipped, dur)
+            await self.ws.send({
+                "type": "backfill_stream_end",
+                "data": {"channel_id": original_channel_id}
+            })
+
+            
+    def _guild_row_from_obj(self, g: discord.Guild) -> dict:
+        try:
+            icon_url = str(g.icon.url) if getattr(g, "icon", None) else None
+        except Exception:
+            icon_url = None
+
+        return {
+            "guild_id": g.id,
+            "name": g.name,
+            "icon_url": icon_url,
+            "owner_id": getattr(g, "owner_id", None),
+            "member_count": getattr(g, "member_count", None),
+            "description": getattr(g, "description", None),
+        }
+
+    async def _snapshot_all_guilds_once(self):
+        try:
+            current_ids = set()
+            for g in list(self.bot.guilds):
+                try:
+                    current_ids.add(g.id)
+                    row = self._guild_row_from_obj(g)
+                    self.db.upsert_guild(**row)
+                except Exception:
+                    logger.exception("[guilds] snapshot: failed guild %s (%s)", getattr(g, "name", "?"), getattr(g, "id", "?"))
+
+            known = set(self.db.get_all_guild_ids())
+            stale = known - current_ids
+            for gid in stale:
+                self.db.delete_guild(gid)
+        except Exception:
+            logger.exception("[guilds] snapshot failed (outer)")
+            
+>>>>>>> web-ui
     async def _shutdown(self):
         """
         Asynchronously shuts down the client.
         """
         logger.info("Shutting down client…")
         self.ws.begin_shutdown()
+<<<<<<< HEAD
+=======
+        self.bus.begin_shutdown()  # make AdminBus sends fast + no retries
+        with contextlib.suppress(Exception):
+            await self.ui_controller.stop()
+        with contextlib.suppress(Exception, asyncio.TimeoutError):
+            await asyncio.wait_for(
+                self.bus.status(running=False, status="Stopped"), 0.4
+            )
+>>>>>>> web-ui
         try:
             t = getattr(self, "_scrape_task", None)
             if getattr(self, "scraper", None):
@@ -969,7 +1614,11 @@ class ClientListener:
         provided client token from the configuration. It ensures proper shutdown
         of the bot and cleanup of pending tasks when the event loop is closed.
         """
+<<<<<<< HEAD
         logger.info("[✨] Starting Copycord Client %s", self.config.CURRENT_VERSION)
+=======
+        logger.info("[✨] Starting Copycord Client %s", CURRENT_VERSION)
+>>>>>>> web-ui
         loop = asyncio.get_event_loop()
         try:
             loop.run_until_complete(self.bot.start(self.config.CLIENT_TOKEN))
@@ -982,5 +1631,22 @@ class ClientListener:
             loop.close()
 
 
+<<<<<<< HEAD
 if __name__ == "__main__":
     ClientListener().run()
+=======
+def _autostart_enabled() -> bool:
+    import os
+
+    return os.getenv("COPYCORD_AUTOSTART", "true").lower() in ("1", "true", "yes", "on")
+
+
+if __name__ == "__main__":
+    if _autostart_enabled():
+        ClientListener().run()
+    else:
+        import time
+
+        while True:
+            time.sleep(3600)
+>>>>>>> web-ui

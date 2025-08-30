@@ -93,7 +93,11 @@ class CloneCommands(commands.Cog):
                 "[⚠️] No allowed users configured: commands will not work for anyone."
             )
         else:
+<<<<<<< HEAD
             logger.info(f"[⚙️] Commands permissions set for users: {self.allowed_users}")
+=======
+            logger.debug(f"[⚙️] Commands permissions set for users: {self.allowed_users}")
+>>>>>>> web-ui
 
     async def _reply_or_dm(self, ctx: discord.ApplicationContext, content: str) -> None:
         """Try ephemeral followup; if the channel is gone, DM the user instead."""
@@ -272,6 +276,7 @@ class CloneCommands(commands.Cog):
             formatted = "\n".join(f"• `{kw}`" for kw in kws)
             await ctx.respond(f"📋 **Blocked keywords:**\n{formatted}", ephemeral=True)
 
+<<<<<<< HEAD
     @commands.slash_command(
         name="verify_structure",
         description="Report any channels or categories not in the last sitemap. Optionally delete them.",
@@ -408,6 +413,8 @@ class CloneCommands(commands.Cog):
 
         logger.info(msg)
         return await self._reply_or_dm(ctx, msg)
+=======
+>>>>>>> web-ui
 
     @commands.slash_command(
         name="announcement_trigger",
@@ -615,6 +622,7 @@ class CloneCommands(commands.Cog):
 
         await ctx.respond(embed=embed, ephemeral=True)
 
+<<<<<<< HEAD
     @commands.slash_command(
         name="clone_messages",
         description="Clone all messages for a *cloned* channel (oldest → newest), queueing live traffic meanwhile.",
@@ -942,6 +950,8 @@ class CloneCommands(commands.Cog):
             embed=self._ok_embed("Member export canceled", msg, show_timestamp=False),
             ephemeral=True,
         )
+=======
+>>>>>>> web-ui
         
     @commands.slash_command(
         name="onjoin_dm",

@@ -7,6 +7,7 @@ _Love this project? Give it a ⭐️ and let others know!_
   <img src="logo/logo.png" alt="Copycord Logo" width="100"/>
 </p>
 
+<<<<<<< HEAD
 **Web UI & New Features Coming soon!**
 
 **Copycord** is a Discord server cloner, designed to help you clone and synchronize an entire server in real time. By leveraging your user account’s WebSocket connection together with a dedicated bot, Copycord keeps your clone server fully up to date.
@@ -35,13 +36,38 @@ _Love this project? Give it a ⭐️ and let others know!_
 3. **Relay**  
    For each new message, sends it via webhook—preserving content, author name, and avatar—in the clone server.
 
+=======
+
+**Copycord** lets you clone and monitor Discord servers in real-time, with a feature-rich slash command system and a sleek, easy-to-use web dashboard.
+Easily clone servers, scrape member lists, customize channels, and much more just a few clicks.
+
+
+> [!IMPORTANT]  
+> **✨ Copycord Features**  
+> - **Full Server Cloning** – Instantly mirror categories, channels, and message history from any target server—with the option to include roles, emojis, and stickers, all fully controlled through the web UI.
+> - **Live Message Forwarding** – Every new message is forwarded in real time to your clone via webhooks, keeping both servers perfectly in sync.  
+> - **Dynamic Structure Sync** – Copycord constantly watches for changes in the source server (new channels, renames, role updates) and applies them to your clone automatically.  
+> - **Advanced Channel Filtering** – Choose exactly which channels to include or exclude for maximum control over your clone’s layout.  
+> - **Custom Branding** – Rename channels, customize webhook names/icons, and make the clone feel like your own personalized community.  
+> - **Smart Message Filtering** – Automatically block or drop unwanted messages based on custom keyword rules.  
+> - **Member Insights** – Use the built-in member scraper to gather detailed information about guild members.  
+> - **Deep History Import** – Clone an entire channel’s message history, not just the new ones.
+> - **Real-Time DM Alerts** – Get instant, customizable DM notifications for important messages and events that matter most to you.  
+> - **Your Own Bot, Your Rules** – Run a fully independent Discord bot that you control—no restrictions.  
+> - **Sleek Web Dashboard** – Manage everything through a modern, easy-to-use web interface. 
+>>>>>>> web-ui
 
 ## Getting Started
 
 ### Prerequisites
 
+<<<<<<< HEAD
 - Docker & Docker Compose  
 - Two Discord applications/accounts: one for listening, one for relaying
+=======
+- [Docker](https://github.com/Copycord/Copycord/blob/main/docs/Instructions.md)
+- Discord Account Token + Discord Bot Token
+>>>>>>> web-ui
 
 ### Setup
 
@@ -76,6 +102,7 @@ _Love this project? Give it a ⭐️ and let others know!_
 
 ## Configuration
 
+<<<<<<< HEAD
 ### 1. Create a new /Copycord folder and add `docker-compose.yml` and `.env` 
 
 In the new folder, create `docker-compose.yml` and `.env`: 
@@ -182,6 +209,48 @@ excluded:
 </details>
 
 ### 3. Launch Copycord
+=======
+### 1. Create a copycord folder and add docker-compose.yml
+```
+copycord/
+├── docker-compose.yml # docker compose file
+└── data/ # data folder will be created automatically
+```
+
+`docker-compose.yml`
+```yaml
+services:
+  admin:
+    image: ghcr.io/copycord/copycord:v2.0.0
+    environment:
+      - ROLE=admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+
+  server:
+    image: ghcr.io/copycord/copycord:v2.0.0
+    environment:
+      - ROLE=server
+    volumes:
+      - ./data:/data
+    depends_on:
+      - admin
+
+  client:
+    image: ghcr.io/copycord/copycord:v2.0.0
+    environment:
+      - ROLE=client
+    volumes:
+      - ./data:/data
+    depends_on:
+      - admin
+    restart: unless-stopped
+```
+
+### 2. Launch Copycord
+>>>>>>> web-ui
 
 Make sure you have Docker & Docker Compose installed, then open a command prompt in the same directory and run:
 
@@ -189,7 +258,38 @@ Make sure you have Docker & Docker Compose installed, then open a command pro
 docker-compose up -d
 ```
 
+<<<<<<< HEAD
 This will pull the latest images, start both the **server** (bot) and **client** (listener), and mount `./data` for database and logs.
+=======
+This will pull the latest images and start the web ui: http://localhost:8080
+
+### 2. Configure Copycord via the web ui
+
+<p align="left">
+  <img src="logo/dashboard.png" alt="Dashboard" width="1000"/>
+</p>
+
+### Configuration
+
+| Option                   | Default | Description                                                                 |
+|--------------------------|---------|-----------------------------------------------------------------------------|
+| `SERVER_TOKEN`           | none    | Your custom Discord bot token                                               |
+| `CLIENT_TOKEN`           | none    | Your personal Discord account token                                         |
+| `HOST_GUILD_ID`          | none    | The ID of the target server you want to clone                               |
+| `CLONE_GUILD_ID`         | none    | The ID of the clone guild you created                                       |
+| `COMMAND_USERS`          | none    | User IDs allowed to execute slash commands in the clone server              |
+| `DELETE_CHANNELS`        | true    | Delete categories + channels when deleted in the target server              |
+| `DELETE_THREADS`         | true    | Delete threads when deleted in the target server                            |
+| `DELETE_ROLES`           | true    | Delete roles when deleted in the target server                              |
+| `CLONE_EMOJI`            | true    | Clone emojis                                                                |
+| `CLONE_STICKER`          | true    | Clone stickers                                                              |
+| `CLONE_ROLES`            | true    | Clone roles                                                                 |
+| `MIRROR_ROLE_PERMISSIONS`| false   | Clone role permission settings (does not apply to channels)                 |
+| `ENABLE_CLONING`         | true    | Turn cloning on/off for the target server (listener mode if disabled)       |
+| `LOG_LEVEL`              | INFO    | Level of logs to show (`INFO` / `DEBUG`)                                    |
+
+
+>>>>>>> web-ui
 ##
 ### Slash commands
 - [Slash Commands Wiki](docs/slash_commands.md)

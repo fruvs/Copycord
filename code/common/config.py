@@ -16,6 +16,7 @@ import aiohttp
 from common.db import DBManager
 
 logger = logging.getLogger(__name__)
+CURRENT_VERSION = "v2.0.0"
 
 
 class Config:
@@ -23,7 +24,6 @@ class Config:
         self,
         logger: Optional[logging.Logger] = None,
     ):
-        self.CURRENT_VERSION = "v1.9.0"
         self.GITHUB_API_LATEST = (
             "https://api.github.com/repos/Copycord/Copycord/releases/latest"
         )
@@ -37,6 +37,10 @@ class Config:
         self.SERVER_WS_PORT = int(os.getenv("SERVER_WS_PORT", "8765"))
         self.SERVER_WS_URL = os.getenv(
             "WS_SERVER_URL", f"ws://{self.SERVER_WS_HOST}:{self.SERVER_WS_PORT}"
+        )
+        self.ADMIN_WS_URL = (
+            os.getenv("ADMIN_WS_URL")
+            or f"ws://{os.getenv('ADMIN_HOST', 'admin')}:{os.getenv('ADMIN_PORT', '8080')}/bus"
         )
 
         self.ENABLE_CLONING = os.getenv("ENABLE_CLONING", "true").lower() in (
@@ -83,11 +87,12 @@ class Config:
             "yes",
         )
 
-        self.logger = logger.getChild(self.__class__.__name__)
+        self.logger = (logger or logging.getLogger(__name__)).getChild(self.__class__.__name__)
         self.excluded_category_ids: set[int] = set()
         self.excluded_channel_ids: set[int] = set()
-        self._load_exclusions_from_yaml()
+        # DB first, YAML deprecated
         self.db = DBManager(self.DB_PATH)
+        self._load_filters_from_db()
         raw = os.getenv("COMMAND_USERS", "")
         self.COMMAND_USERS = [int(u) for u in raw.split(",") if u.strip()]
 
@@ -101,31 +106,6 @@ class Config:
         )
         self.SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", "3600"))
 
-        # ─── VALIDATION ─────────────────────────────────────────────────
-        for name in ("SERVER_TOKEN", "CLIENT_TOKEN"):
-            if not getattr(self, name):
-                self.logger.error(f"Missing required environment variable {name}")
-                sys.exit(1)
-
-        for name in ("HOST_GUILD_ID", "CLONE_GUILD_ID"):
-            raw = getattr(self, name)
-            if raw is None:
-                self.logger.error(f"Missing required Discord guild ID env var: {name}")
-                sys.exit(1)
-            try:
-                val = int(raw)
-            except (TypeError, ValueError):
-                self.logger.error(
-                    f"Discord guild ID {name} must be an integer (got {raw!r}); aborting."
-                )
-                sys.exit(1)
-            if val <= 0:
-                self.logger.error(
-                    f"Discord guild ID {name} must be a positive integer (got {val}); shutting down."
-                )
-                sys.exit(1)
-            setattr(self, name, val)
-
     async def setup_release_watcher(self, receiver, should_dm: bool = True):
         """Poll GitHub and (optionally) update presence/DM if remote > local.
         Safe to run from both server and client; client has no update_status.
@@ -134,8 +114,8 @@ class Config:
         db = receiver.db
 
         # Keep DB's "running version" in sync with the binary
-        if db.get_version() != self.CURRENT_VERSION:
-            db.set_version(self.CURRENT_VERSION)
+        if db.get_version() != CURRENT_VERSION:
+            db.set_version(CURRENT_VERSION)
 
         import re
 
@@ -231,7 +211,7 @@ class Config:
                 tag, url = max(candidates, key=lambda x: _ver_tuple(x[0]))
 
                 # Compare GitHub latest vs our running version
-                cmp_remote_local = _cmp_versions(tag, self.CURRENT_VERSION)
+                cmp_remote_local = _cmp_versions(tag, CURRENT_VERSION)
 
                 # Visibility log if observed tag changed (independent of notifications)
                 last_seen = db.get_notified_version() or ""
@@ -270,7 +250,7 @@ class Config:
                                 )
                 else:
                     # Equal or ahead → show local version (server only)
-                    await _maybe_update_status(f"{self.CURRENT_VERSION}")
+                    await _maybe_update_status(f"{CURRENT_VERSION}")
 
                     # If we just matched GitHub, align notified_version
                     if cmp_remote_local == 0 and _norm_version(tag) != _norm_version(
@@ -279,90 +259,28 @@ class Config:
                         db.set_notified_version(tag)
 
                 # Keep DB "running version" aligned
-                if db.get_version() != self.CURRENT_VERSION:
-                    db.set_version(self.CURRENT_VERSION)
+                if db.get_version() != CURRENT_VERSION:
+                    db.set_version(CURRENT_VERSION)
 
             except Exception:
                 self.logger.exception("[⛔] Error in version release watcher loop")
 
             await asyncio.sleep(self._release_interval)
 
-    def _load_exclusions_from_yaml(self):
-        import os, yaml
-
-        cfg_path = os.getenv("CONFIG_YAML", "/data/config.yml")
-        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-
-        DEFAULT_YAML = """# Copycord filtering config
-    # - whitelist: if any IDs listed, ONLY those categories/channels are allowed.
-    # - excluded:  drop these unless they are explicitly whitelisted. (When both match, WHITELIST TAKES PRECEDENCE.)
-    # Tip: leave lists as [] to disable that filter.
-    # IDs must be integers. Examples shown below.
-    # If a category ID is added, all channels from that category are included.
-
-    whitelist:
-        categories: []   # e.g. [123456789012345678, 234567890123456789]
-        channels: []     # e.g. [345678901234567890]
-
-    excluded:
-        categories: []   # e.g. [456789012345678901]
-        channels: []     # e.g. [567890123456789012]
-    """
-
-        # Create default if missing (write with comments)
-        if not os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, "w", encoding="utf-8") as f:
-                    f.write(DEFAULT_YAML)
-                if getattr(self, "logger", None):
-                    self.logger.info(
-                        "[📝] Created default config.yml at %s", cfg_path
-                    )
-            except Exception as e:
-                if getattr(self, "logger", None):
-                    self.logger.warning("[⚠️] Could not write default config.yml: %s", e)
-
-            # Defaults in-memory
-            self.include_category_ids = set()
-            self.include_channel_ids = set()
-            self.excluded_category_ids = set()
-            self.excluded_channel_ids = set()
-            self.whitelist_enabled = False
-            return
-
-        # Load existing (treat empty or invalid file as blanks)
+    def _load_filters_from_db(self):
+        """
+        Populate include/exclude sets from SQLite filters table.
+        Whitelist is ON iff any include set is non-empty.
+        """
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-        except Exception as e:
-            if getattr(self, "logger", None):
-                self.logger.warning(
-                    "[⚠️] Failed to parse %s, using empty filters: %s", cfg_path, e
-                )
-            data = {}
+            f = self.db.get_filters()
+        except Exception:
+            # Safe defaults
+            f = {"whitelist": {"category": set(), "channel": set()},
+                "exclude":   {"category": set(), "channel": set()}}
 
-        # Support alias 'included' for 'whitelist'
-        wl = (data.get("whitelist") or data.get("included") or {}) or {}
-        ex = (data.get("excluded") or {}) or {}
-
-        def to_ids(items):
-            out = set()
-            for x in items or []:
-                try:
-                    out.add(int(str(x).strip()))
-                except Exception:
-                    if getattr(self, "logger", None):
-                        self.logger.warning(
-                            "[⚠️] Ignoring non-integer ID in config.yml: %r", x
-                        )
-            return out
-
-        self.include_category_ids = to_ids(wl.get("categories"))
-        self.include_channel_ids = to_ids(wl.get("channels"))
-        self.excluded_category_ids = to_ids(ex.get("categories"))
-        self.excluded_channel_ids = to_ids(ex.get("channels"))
-
-        # Whitelist is ON only if either include list is non-empty
-        self.whitelist_enabled = bool(
-            self.include_category_ids or self.include_channel_ids
-        )
+        self.include_category_ids   = {int(x) for x in f["whitelist"]["category"]}
+        self.include_channel_ids    = {int(x) for x in f["whitelist"]["channel"]}
+        self.excluded_category_ids  = {int(x) for x in f["exclude"]["category"]}
+        self.excluded_channel_ids   = {int(x) for x in f["exclude"]["channel"]}
+        self.whitelist_enabled      = bool(self.include_category_ids or self.include_channel_ids)

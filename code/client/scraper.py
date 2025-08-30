@@ -70,8 +70,16 @@ class MemberScraper:
     async def scrape(
         self,
         channel_id: int | str | None = None,  # kept for compatibility
+<<<<<<< HEAD
         include_names: bool = True,
         *,
+=======
+        *,
+        guild_id: int | str | None = None,
+        include_username: bool = False,
+        include_avatar_url: bool = False,
+        include_bio: bool = False,
+>>>>>>> web-ui
         alphabet: str = "abcdefghijklmnopqrstuvwxyz0123456789_- .!@#$%^&*()+={}[]|:;\"'<>,.?/~`",
         max_parallel_per_session: int = 1,
         hello_ready_delay: float = 2.5,
@@ -80,16 +88,38 @@ class MemberScraper:
         recycle_after_dispatch: int = 2000,
         stall_timeout: float = 120.0,
         num_sessions: int = 1,
+<<<<<<< HEAD
         strict_complete: bool = False,  # Keep going after initial guild member_count is found
+=======
+        strict_complete: bool = False,
+>>>>>>> web-ui
     ) -> Dict[str, Any]:
         # reset cancel flag for this run
         self._cancel_event = asyncio.Event()
 
         # ---------------------------- resolve guild ----------------------------
+<<<<<<< HEAD
         guild_id = getattr(self.config, "HOST_GUILD_ID", None)
         guild = self.bot.get_guild(int(guild_id)) if guild_id else None
         if not guild:
             raise RuntimeError("No guild available for scrape")
+=======
+        gid_in = guild_id if guild_id is not None else getattr(self.config, "HOST_GUILD_ID", None)
+        try:
+            gid_int = int(gid_in) if gid_in is not None else None
+        except Exception:
+            gid_int = None
+
+        if gid_int is None:
+            raise RuntimeError("No guild id provided and HOST_GUILD_ID is not set")
+
+        guild = self.bot.get_guild(gid_int)
+        if not guild:
+            raise RuntimeError(f"Guild {gid_int} not found or not cached")
+
+        gname = getattr(guild, "name", "UNKNOWN")
+        self.log.debug(f"[guild] Target guild: {gname} ({guild.id}) (source={'caller' if guild_id is not None else 'config'})")
+>>>>>>> web-ui
 
         gname = getattr(guild, "name", "UNKNOWN")
         self.log.debug(f"[guild] Target guild: {gname} ({guild.id})")
@@ -136,6 +166,15 @@ class MemberScraper:
         if is_bot:
             # GUILDS (1<<0) + GUILD_MEMBERS (1<<1) to make member chunks flow
             identify_d["intents"] = (1 << 0) | (1 << 1)
+<<<<<<< HEAD
+=======
+            
+        def build_avatar_url(uid: str, avatar_hash: str | None) -> str | None:
+            if not uid or not avatar_hash:
+                return None
+            ext = "gif" if str(avatar_hash).startswith("a_") else "png"
+            return f"https://cdn.discordapp.com/avatars/{uid}/{avatar_hash}.{ext}?size=1024"
+>>>>>>> web-ui
 
         # ---------------------------- shared stores ----------------------------
         members: Dict[str, Dict[str, Any]] = {}
@@ -146,13 +185,26 @@ class MemberScraper:
         # Global warm-up guards (only once per whole run)
         warmup_lock = asyncio.Lock()
         warmup_done = asyncio.Event()
+<<<<<<< HEAD
+=======
+                
+        bios_needed: set[str] = set() if include_bio else set()
+>>>>>>> web-ui
 
         # ---------------------------- helpers ----------------------------
         def shard_alphabet(alpha: str, k: int, n: int) -> str:
             return "".join(list(alpha)[k::n]) if n > 1 else alpha
 
+<<<<<<< HEAD
         def should_stop() -> bool:
             return stop_event.is_set() or self._cancel_event.is_set()
+=======
+        def user_cancelled() -> bool:
+            return self._cancel_event.is_set()
+
+        def target_reached() -> bool:
+            return stop_event.is_set()
+>>>>>>> web-ui
 
         def next_sibling_prefix(q: str, alpha: str) -> Optional[str]:
             """Find the lexicographic next prefix at the same depth as q."""
@@ -225,8 +277,15 @@ class MemberScraper:
                 )
 
             async def send_op8(ws, q: str, *, limit: int) -> str:
+<<<<<<< HEAD
                 if should_stop():
                     raise asyncio.CancelledError()
+=======
+                if user_cancelled():
+                    raise asyncio.CancelledError()
+                if target_reached():
+                    return "" 
+>>>>>>> web-ui
                 n = mk_nonce(q)
                 payload = {
                     "op": 8,
@@ -255,11 +314,19 @@ class MemberScraper:
             async def pump_more(ws, reason: str):
                 """Dispatch more op:8 requests, respecting per-session parallelism."""
                 nonlocal dispatched_since_connect
+<<<<<<< HEAD
                 if should_stop():
                     return
                 started = 0
                 while search_queue and len(in_flight_nonces) < max_parallel_per_session:
                     if should_stop():
+=======
+                if user_cancelled() or target_reached():
+                    return
+                started = 0
+                while search_queue and len(in_flight_nonces) < max_parallel_per_session:
+                    if user_cancelled() or target_reached():
+>>>>>>> web-ui
                         return
                     q = search_queue.popleft()
                     try:
@@ -285,7 +352,14 @@ class MemberScraper:
                 """Requeue long-stuck inflight requests; trigger recycle on stalls."""
                 try:
                     while True:
+<<<<<<< HEAD
                         if should_stop():
+=======
+                        if user_cancelled():
+                            recycle_now.set()
+                            return
+                        if target_reached():
+>>>>>>> web-ui
                             recycle_now.set()
                             return
                         await asyncio.sleep(0.5)
@@ -360,11 +434,20 @@ class MemberScraper:
 
             # ---------------------------- main WS loop ----------------------------
             while True:
+<<<<<<< HEAD
                 if should_stop():
                     self.log.debug(
                         f"[S{session_index}] should_stop() at loop top → raise CancelledError"
                     )
                     raise asyncio.CancelledError()
+=======
+                if user_cancelled():
+                    self.log.debug(f"[S{session_index}] user cancel → CancelledError")
+                    raise asyncio.CancelledError()
+                if target_reached():
+                    self.log.debug(f"[S{session_index}] target reached → normal return")
+                    return
+>>>>>>> web-ui
 
                 await ensure_prefix_seeded()
 
@@ -421,6 +504,7 @@ class MemberScraper:
                                         pass
                                     break
 
+<<<<<<< HEAD
                                 if (
                                     (stop_task in done)
                                     or (cnl_task in done)
@@ -433,6 +517,20 @@ class MemberScraper:
                                         await ws.close(
                                             code=1000, message=b"target_or_cancel"
                                         )
+=======
+                                if stop_task in done or target_reached():
+                                    self.log.debug(f"[S{session_index}:ws] target reached → close & return")
+                                    try:
+                                        await ws.close(code=1000, message=b"target_reached")
+                                    except Exception:
+                                        pass
+                                    return  # normal success exit for this session
+
+                                if cnl_task in done or user_cancelled():
+                                    self.log.debug(f"[S{session_index}:ws] user cancel → close & CancelledError")
+                                    try:
+                                        await ws.close(code=1000, message=b"user_cancel")
+>>>>>>> web-ui
                                     except Exception:
                                         pass
                                     raise asyncio.CancelledError()
@@ -554,6 +652,7 @@ class MemberScraper:
                                                     uid = u.get("id")
                                                     if not uid or uid in members:
                                                         continue
+<<<<<<< HEAD
                                                     rec = {
                                                         "id": uid,
                                                         "bot": bool(
@@ -577,6 +676,21 @@ class MemberScraper:
                                                                 ),
                                                             }
                                                         )
+=======
+                                                    rec = {"id": uid}
+
+                                                    # Optional fields
+                                                    if include_username:
+                                                        rec["username"] = u.get("username")
+
+                                                    if include_avatar_url:
+                                                        rec["avatar_url"] = build_avatar_url(uid, u.get("avatar"))
+
+                                                    # Optional: mark for later bio enrichment
+                                                    if include_bio:
+                                                        bios_needed.add(uid)
+
+>>>>>>> web-ui
                                                     members[uid] = rec
                                                     added_here += 1
                                             if added_here:
@@ -721,6 +835,51 @@ class MemberScraper:
                 f"[Copycord Scraper Beta ✨] Starting member scrape in {gname}"
             )
             await asyncio.gather(*(run_session(i) for i in range(num_sessions)))
+<<<<<<< HEAD
+=======
+            if include_bio and bios_needed:
+                conc = int(getattr(self.config, "BIO_FETCH_CONCURRENCY", 3))
+                limit = int(getattr(self.config, "BIO_FETCH_LIMIT", 500))  # safety cap
+                headers = {}
+                tok = getattr(self.config, "CLIENT_TOKEN", None)
+                if tok:
+                    low = str(tok).lower()
+                    if low.startswith("bot ") or low.startswith("bearer "):
+                        headers["Authorization"] = tok
+                    else:
+                        # If the running identity is a bot, most tokens are raw; prefix with Bot
+                        try:
+                            is_bot = bool(getattr(getattr(self.bot, "user", None), "bot", False))
+                        except Exception:
+                            is_bot = False
+                        headers["Authorization"] = f"Bot {tok}" if is_bot else tok
+
+                async def fetch_bio_one(sess, uid: str) -> None:
+                    url = f"https://discord.com/api/v10/users/{uid}/profile"
+                    try:
+                        async with sess.get(url, timeout=15) as r:
+                            if r.status != 200:
+                                return
+                            j = await r.json()
+                            bio_val = (j.get("user") or {}).get("bio") or j.get("bio")
+                            if bio_val is not None:
+                                async with members_lock:
+                                    if uid in members:
+                                        members[uid]["bio"] = bio_val
+                    except Exception:
+                        return  # swallow errors; keep best-effort
+
+                try:
+                    sem = asyncio.Semaphore(max(1, conc))
+                    subset = list(bios_needed)[:max(0, limit)]
+                    async with aiohttp.ClientSession(headers=headers) as sess_bio:
+                        async def bound(u):
+                            async with sem:
+                                await fetch_bio_one(sess_bio, u)
+                        await asyncio.gather(*(bound(u) for u in subset))
+                except Exception:
+                    pass
+>>>>>>> web-ui
             if dynamic_leads_added_global:
                 self.log.info(
                     "[discover] %d dynamic leading characters discovered this run: %s",
@@ -740,6 +899,7 @@ class MemberScraper:
             )
             self._cancel_event.set()
             raise
+<<<<<<< HEAD
 
 
 class StreamManager:
@@ -895,3 +1055,5 @@ class StreamManager:
             os.unlink(path)
         except Exception:
             pass
+=======
+>>>>>>> web-ui
