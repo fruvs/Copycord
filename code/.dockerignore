@@ -1,39 +1,49 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.whl
 *.egg-info/
-build/
-dist/
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-.vscode/
-.idea/
-.git
-.gitignore
-.gitattributes
-.env
-*.env
 .venv/
 venv/
 *.log
 *.tmp
 *.bak
 *.old
+
+# Node / Frontend
+code/admin/frontend/node_modules/
+code/admin/frontend/.vite/
+code/admin/frontend/.cache/
+code/admin/frontend/dist/       
+code/admin/static/assets/ 
+
+# Project-specific
+/data
+/backup
+config/
+tmp/
+build/
+dist/
+compose.yml
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Archives / Backups
 *.zip
 *.tar
 *.gz
 *.rar
 *.7z
-data/
-config/
-tmp/
 
-code/admin/frontend/node_modules
-code/admin/frontend/.vite
-code/admin/frontend/.cache
-
-code/admin/static/assets/
+# Git / Docker
+.git
+.gitattributes
+.dockerignore
