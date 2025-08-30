@@ -32,7 +32,7 @@ jobs:
       - name: Build & push server
         uses: docker/build-push-action@v5
         with:
-          context: ./code                   
+          context: .                   
           file: ./code/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
