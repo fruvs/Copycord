@@ -9,7 +9,7 @@ This guide explains how to install Docker and Docker Compose and run Copycord.
 
 ---
 
-## Step 1: Install Docker and Docker Compose
+## Install Docker and Docker Compose
 
 ### Windows
 1. Download and install **Docker Desktop for Windows** from the official site:
@@ -30,7 +30,7 @@ This guide explains how to install Docker and Docker Compose and run Copycord.
 curl -fsSL https://get.docker.com | sh
 ```
 
-5. Verify installation:
+Verify installation:
 
 ```bash
 docker --version
@@ -39,40 +39,16 @@ docker compose version
 
 ---
 
-<<<<<<< HEAD
-## Step 2: Start Copycord
-=======
-## Step 2: Configure the Environment
 
-- Update your `.env` file and `docker-compose.yml` with your tokens and guild IDs.
-- Refer to the `README.md` in the repository for full configuration details.
-
----
-
-## Step 4: Start Copycord
->>>>>>> web-ui
+## Start Copycord
 In your terminal, navigate to the Copycord directory you created:
 
 ```
 docker compose up -d
 ```
 
-<<<<<<< HEAD
-This will start  the web ui http://localhost:8080
-=======
-This will start both the client and server containers.
----
+This will start the web ui http://localhost:8080
 
-## Step 5: Monitor Logs (optional)
-
-```
-docker compose logs -f
-```
-
-This command shows live logs from the running containers. If you are on Windows, simply open the Docker Desktop app to view logs.
->>>>>>> web-ui
-
----
 
 ## Stopping Copycord
 
