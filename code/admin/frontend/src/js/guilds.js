@@ -2,7 +2,6 @@
   const root = document.getElementById("guilds-root");
   const empty = document.getElementById("guilds-empty");
   const search = document.getElementById("g-search");
-  const sortSel = document.getElementById("g-sort");
   const dirBtn = document.getElementById("g-sortdir");
   if (!root) return;
 
@@ -35,9 +34,8 @@
 
   function openMenuAsPopover(menuEl, clickEvent, cardEl) {
     const layer = ensurePopoverLayer();
-
+  
     menuEl.dataset.gid = cardEl.dataset.gid;
-
     menuEl.hidden = false;
     menuEl.classList.add("popover");
     layer.appendChild(menuEl);
@@ -71,17 +69,6 @@
 
     menuEl.style.left = Math.round(x) + "px";
     menuEl.style.top = Math.round(y) + "px";
-
-    const onDocClick = (e) => {
-      if (!menuEl.contains(e.target)) {
-        teardown();
-      }
-    };
-    const onKey = (e) => {
-      if (e.key === "Escape") teardown();
-    };
-    const onWin = () => teardown();
-
     function teardown() {
       document.removeEventListener("click", onDocClick, true);
       document.removeEventListener("keydown", onKey, true);
@@ -93,7 +80,18 @@
       menuEl.classList.remove("popover");
       menuEl.style.left = menuEl.style.top = menuEl.style.right = "";
     }
-
+  
+    const onDocClick = (e) => {
+      if (!menuEl.contains(e.target)) teardown();
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        teardown();
+      }
+    };
+    const onWin = () => teardown();
+  
     setTimeout(() => {
       document.addEventListener("click", onDocClick, true);
     }, 0);
@@ -296,18 +294,18 @@
       return;
     }
     empty.hidden = true;
-
+  
     const frag = document.createDocumentFragment();
-
+  
     for (const g of filtered) {
       const card = document.createElement("article");
       card.className = "guild-card";
       card.dataset.gid = String(g.id);
-
+  
       const icon = g.icon_url
         ? `<img class="guild-icon" src="${encodeURI(g.icon_url)}" alt="">`
         : `<img class="guild-icon" src="/static/logo.png" alt="">`;
-
+  
       const actions = `
         <div class="guild-actions">
           <div class="action-menu" role="menu" hidden>
@@ -317,7 +315,7 @@
           </div>
         </div>
       `;
-
+  
       card.innerHTML = `
         ${actions}
         <div class="guild-card-body">
@@ -326,12 +324,12 @@
           <div class="scrape-badge" hidden>Scraping…</div>
         </div>
       `;
-
+  
       frag.appendChild(card);
     }
-
+  
     root.appendChild(frag);
-
+  
     requestAnimationFrame(() => {
       root.querySelectorAll(".guild-card").forEach((cardEl) => {
         const gid = cardEl.dataset.gid;
@@ -340,41 +338,54 @@
         if (nameEl) setEllipsisTitle(nameEl, g?.name ?? nameEl.textContent);
       });
     });
-
+  
     const hideAllCardMenus = () => {
-      root
-        .querySelectorAll(".guild-actions .action-menu")
-        .forEach((m) => (m.hidden = true));
+      root.querySelectorAll(".guild-actions .action-menu").forEach((m) => {
+        m.hidden = true;
+        m.classList.remove("popover");
+        m.style.left = m.style.top = m.style.right = "";
+      });
+  
+      document.querySelectorAll("#popover-layer .action-menu").forEach((m) => {
+        const gid = m.dataset.gid;
+        const card = root.querySelector(`.guild-card[data-gid="${CSS.escape(gid)}"]`);
+        if (card) card.querySelector(".guild-actions")?.appendChild(m);
+        m.hidden = true;
+        m.classList.remove("popover");
+        m.style.left = m.style.top = m.style.right = "";
+      });
     };
-
+  
+    // 🔑 Restore card click to open its menu
     root.querySelectorAll(".guild-card").forEach((cardEl) => {
       cardEl.addEventListener("click", (e) => {
         if (e.target.closest(".action-menu")) return;
-
+  
         const menu = cardEl.querySelector(".guild-actions .action-menu");
         const isOpen =
           menu && !menu.hidden && menu.parentElement?.id === "popover-layer";
-
+  
         hideAllCardMenus();
         if (!menu || isOpen) return;
-
+  
         openMenuAsPopover(menu, e, cardEl);
       });
     });
-
+  
+    // Handle clicks on menu items
     root.addEventListener("click", (e) => {
       const item = e.target.closest(
         ".guild-actions .action-menu button[role='menuitem'], #popover-layer .action-menu button[role='menuitem']"
       );
       if (!item) return;
-
+  
       e.stopPropagation();
       const menu = item.closest(".action-menu");
       const gid = menu?.dataset.gid;
       const g = data.find((x) => x.id === gid);
-
+  
       hideAllCardMenus();
-
+  
       switch (item.dataset.act) {
         case "scrape":
           openScraperDialog(g);
@@ -390,14 +401,14 @@
           break;
       }
     });
-
+  
     document.addEventListener("click", (e) => {
       if (!root.contains(e.target)) hideAllCardMenus();
     });
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") hideAllCardMenus();
     });
-
+  
     setScrapeState(scrapeRunning);
   }
 
@@ -597,10 +608,14 @@
               <span>Avatar</span>
             </label>
 
-            <label class="check">
-              <input type="checkbox" id="scr-inc-bio">
-              <span>Bio</span>
-            </label>
+          <label class="check has-tip">
+            <input type="checkbox" id="scr-inc-bio">
+            <span class="label-text">Bio</span>
+            <button type="button" class="info-dot" aria-expanded="false" aria-controls="scr-bio-tip"></button>
+            <span id="scr-bio-tip" class="tip-bubble" hidden>
+              Fetching bios is slow — Discord rate-limits these requests heavily, so fetching all user bios can take a long time.
+            </span>
+          </label>
 
             <p class="hint">If none are selected, we’ll scrape <b>IDs only</b>.</p>
           </fieldset>
@@ -614,14 +629,68 @@
         </div>
 
         <footer class="scraper-actions">
-          <button class="btn btn-ghost" data-act="cancel">Cancel</button>
           <button class="btn btn-primary" data-act="start">Start scrape</button>
         </footer>
       </div>
     `;
     document.body.appendChild(modal);
 
-    const close = () => modal.remove();
+    (() => {
+      const dots = modal.querySelectorAll(".check.has-tip .info-dot");
+
+      dots.forEach((dot) => {
+        const bubbleId = dot.getAttribute("aria-controls");
+        const bubble =
+          (bubbleId && modal.querySelector(`#${CSS.escape(bubbleId)}`)) ||
+          dot.nextElementSibling;
+
+        if (!bubble) return;
+
+        const closeOutside = (ev) => {
+          if (ev.target === dot || bubble.contains(ev.target)) return;
+          dot.setAttribute("aria-expanded", "false");
+          bubble.hidden = true;
+          document.removeEventListener("click", closeOutside, true);
+        };
+
+        dot.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const expanded = dot.getAttribute("aria-expanded") === "true";
+          const nextState = !expanded;
+
+          dot.setAttribute("aria-expanded", String(nextState));
+          bubble.hidden = !nextState;
+
+          document.removeEventListener("click", closeOutside, true);
+          if (nextState)
+            setTimeout(
+              () => document.addEventListener("click", closeOutside, true),
+              0
+            );
+        });
+
+
+        dot.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape") {
+            dot.setAttribute("aria-expanded", "false");
+            bubble.hidden = true;
+            dot.blur();
+          }
+        });
+      });
+    })();
+
+    const close = () => {
+      modal.remove();
+      document.removeEventListener("keydown", onEsc);
+    };
+
+    const onEsc = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    };
 
     modal.querySelector(".scraper-close")?.addEventListener("click", close);
     modal
@@ -630,6 +699,7 @@
     modal.addEventListener("click", (e) => {
       if (e.target.classList.contains("modal-backdrop")) close();
     });
+    document.addEventListener("keydown", onEsc);
 
     modal
       .querySelector('[data-act="start"]')
@@ -762,10 +832,6 @@
   }
 
   search?.addEventListener("input", applySearch);
-  sortSel?.addEventListener("change", () => {
-    sortBy = sortSel.value || "name";
-    render();
-  });
   dirBtn?.addEventListener("click", toggleDir);
 
   document.addEventListener("DOMContentLoaded", () => {
@@ -782,7 +848,6 @@
         "#guilds-root",
         "#guilds-empty",
         "#g-search",
-        "#g-sort",
         "#g-sortdir",
       ],
     });

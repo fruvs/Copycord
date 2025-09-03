@@ -10,24 +10,20 @@
 import discord
 from discord.ext import commands
 from discord import (
-    CategoryChannel,
     Option,
     Embed,
     Color,
-    ChannelType,
-    SlashCommandOptionType,
 )
-from discord.errors import NotFound, Forbidden
+from discord.errors import NotFound, Forbidden, HTTPException  
 from discord import errors as discord_errors
 from datetime import datetime, timezone
 import time
 import logging
-import asyncio
 import time
 from common.config import Config
 from common.db import DBManager
 from server.rate_limiter import RateLimitManager, ActionType
-from server.helpers import MemberExportService, ExportJob
+from server.helpers import PurgeAssetHelper
 
 logger = logging.getLogger("server")
 
@@ -46,8 +42,7 @@ class CloneCommands(commands.Cog):
         self.ratelimit = RateLimitManager()
         self.start_time = time.time()
         self.allowed_users = getattr(config, "COMMAND_USERS", []) or []
-        self.export = MemberExportService(self.bot, self.bot.ws_manager, logger=logger)
-        self._export_jobs: dict[int, ExportJob] = {}
+
 
     async def cog_check(self, ctx: commands.Context):
         """
@@ -95,31 +90,64 @@ class CloneCommands(commands.Cog):
         else:
             logger.debug(f"[⚙️] Commands permissions set for users: {self.allowed_users}")
 
-    async def _reply_or_dm(self, ctx: discord.ApplicationContext, content: str) -> None:
-        """Try ephemeral followup; if the channel is gone, DM the user instead."""
-        try:
-            await ctx.followup.send(content, ephemeral=True)
-            return
-        except NotFound:
-            pass
-        except Forbidden:
-            pass
+    async def _reply_or_dm(
+        self,
+        ctx: discord.ApplicationContext,
+        content: str | None = None,
+        *,
+        embed: discord.Embed | None = None,
+        ephemeral: bool = True,
+        mention_on_channel_fallback: bool = True,
+    ) -> None:
+        """
+        DM-first delivery:
+        1) Try DM (uses bot token, no webhook expiry)
+        2) If DM blocked, try interaction response/followup (ephemeral)
+        3) If 401 (invalid/expired token) or other failure, try channel.send (optional @mention)
+        4) Log if everything fails
+        """
+        user = getattr(ctx, "user", None) or getattr(ctx, "author", None)
+        
+        if user:
+            try:
+                if content and len(content) > 2000:
+                    start = 0
+                    while start < len(content):
+                        end = min(start + 2000, len(content))
+                        nl = content.rfind("\n", start, end)
+                        if nl == -1 or nl <= start + 100:
+                            nl = end
+                        await user.send(content[start:nl], embed=None if start else embed)
+                        start = nl
+                else:
+                    await user.send(content=content, embed=embed)
+                return
+            except (Forbidden, NotFound):
+                pass 
 
         try:
-            MAX = 2000
-            if len(content) <= MAX:
-                await ctx.user.send(content)
-            else:
-                start = 0
-                while start < len(content):
-                    end = min(start + MAX, len(content))
-                    nl = content.rfind("\n", start, end)
-                    if nl == -1 or nl <= start + 100:
-                        nl = end
-                    await ctx.user.send(content[start:nl])
-                    start = nl
-        except Forbidden:
-            logger.warning("[verify_structure] Could not DM user; DMs are closed.")
+            if not ctx.response.is_done():
+                await ctx.respond(content=content, embed=embed, ephemeral=ephemeral)
+                return
+            await ctx.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+            return
+        except HTTPException as e:
+            if getattr(e, "status", None) != 401:
+                pass
+
+        ch = getattr(ctx, "channel", None)
+        if ch:
+            try:
+                prefix = f"{user.mention} " if (mention_on_channel_fallback and user) else ""
+                await ch.send(prefix + (content or ""), embed=embed)
+                return
+            except (Forbidden, NotFound):
+                pass
+
+        if hasattr(self, "log"):
+            self.log.warning("[_reply_or_dm] Failed to deliver via DM, followup, and channel.")
+        else:
+            logger.warning("[_reply_or_dm] Failed to deliver via DM, followup, and channel.")
 
     def _ok_embed(
         self,
@@ -520,6 +548,340 @@ class CloneCommands(commands.Cog):
             embed=Embed(title=title, description=desc, color=color),
             ephemeral=True,
         )
+        
+    @commands.slash_command(
+        name="purge_assets",
+        description="Delete ALL emojis, stickers, or roles.",
+        guild_ids=[GUILD_ID],
+    )
+    async def purge_assets(
+        self,
+        ctx: discord.ApplicationContext,
+        kind: str = Option(str, "What to delete", required=True, choices=["emojis", "stickers", "roles"]),
+        confirm: str = Option(str, "Type 'confirm' to run this DESTRUCTIVE action", required=True),
+        unmapped_only: bool = Option(bool, "Only delete assets that are NOT mapped in the DB", required=False, default=False),
+    ):
+        await ctx.defer(ephemeral=True)
+
+        if (confirm or "").strip().lower() != "confirm":
+            return await ctx.followup.send(
+                embed=self._err_embed("Confirmation required", "Re-run the command and type **confirm** to proceed."),
+                ephemeral=True,
+            )
+
+        helper = PurgeAssetHelper(self)
+        guild = ctx.guild
+        if not guild:
+            return await ctx.followup.send("No guild context.", ephemeral=True)
+
+        RL_EMOJI   = getattr(ActionType, "EMOJI", "EMOJI")
+        RL_STICKER = getattr(ActionType, "STICKER", "STICKER")
+        RL_ROLE    = getattr(ActionType, "ROLE", "ROLE")
+
+        deleted = skipped = failed = 0
+        deleted_ids: list[int] = []
+
+        await ctx.followup.send(
+            embed=self._ok_embed("Starting purge…", f"Target: `{kind}`\nMode: `{'unmapped_only' if unmapped_only else 'ALL'}`\nI'll DM you when finished."),
+            ephemeral=True,
+        )
+        helper._log_purge_event(kind=kind, outcome="begin", guild_id=guild.id, user_id=ctx.user.id,
+                                reason=f"Manual purge (mode={'unmapped_only' if unmapped_only else 'all'})")
+
+        def _is_mapped(kind_name: str, cloned_id: int) -> bool:
+            if kind_name == "emojis":
+                row = self.db.conn.execute("SELECT 1 FROM emoji_mappings WHERE cloned_emoji_id=? LIMIT 1", (int(cloned_id),)).fetchone()
+                return bool(row)
+            if kind_name == "stickers":
+                row = self.db.conn.execute("SELECT 1 FROM sticker_mappings WHERE cloned_sticker_id=? LIMIT 1", (int(cloned_id),)).fetchone()
+                return bool(row)
+            if kind_name == "roles":
+                row = self.db.conn.execute("SELECT 1 FROM role_mappings WHERE cloned_role_id=? LIMIT 1", (int(cloned_id),)).fetchone()
+                return bool(row)
+            return False
+
+        try:
+            # =============================
+            # EMOJIS
+            # =============================
+            if kind == "emojis":
+                for em in list(guild.emojis):
+                    if unmapped_only and _is_mapped("emojis", em.id):
+                        skipped += 1
+                        helper._log_purge_event("emojis", "skipped", guild.id, ctx.user.id, em.id, em.name,
+                                                "Unmapped-only mode: mapped in DB")
+                        continue
+                    try:
+                        await self.ratelimit.acquire(RL_EMOJI)
+                        await em.delete(reason=f"Purge by {ctx.user.id}")
+                        deleted += 1
+                        deleted_ids.append(int(em.id))
+                        helper._log_purge_event("emojis", "deleted", guild.id, ctx.user.id, em.id, em.name, "Manual purge")
+                    except discord.Forbidden as e:
+                        skipped += 1
+                        helper._log_purge_event("emojis", "skipped", guild.id, ctx.user.id, em.id, em.name, f"Manual purge: {e}")
+                    except Exception as e:
+                        failed += 1
+                        helper._log_purge_event("emojis", "failed", guild.id, ctx.user.id, em.id, em.name, f"Manual purge: {e}")
+
+                if unmapped_only:
+                    if deleted_ids:
+                        placeholders = ",".join("?" * len(deleted_ids))
+                        self.db.conn.execute(
+                            f"DELETE FROM emoji_mappings WHERE cloned_emoji_id IN ({placeholders})",
+                            (*deleted_ids,)
+                        )
+                        self.db.conn.commit()
+                else:
+                    self.db.conn.execute("DELETE FROM emoji_mappings")
+                    self.db.conn.commit()
+
+            # =============================
+            # STICKERS
+            # =============================
+            elif kind == "stickers":
+                stickers = list(getattr(guild, "stickers", []))
+                if not stickers:
+                    try:
+                        stickers = list(await guild.fetch_stickers())
+                    except Exception:
+                        stickers = []
+                for st in stickers:
+                    if unmapped_only and _is_mapped("stickers", st.id):
+                        skipped += 1
+                        helper._log_purge_event("stickers", "skipped", guild.id, ctx.user.id, st.id, st.name,
+                                                "Unmapped-only mode: mapped in DB")
+                        continue
+                    try:
+                        await self.ratelimit.acquire(RL_STICKER)
+                        await st.delete(reason=f"Purge by {ctx.user.id}")
+                        deleted += 1
+                        deleted_ids.append(int(st.id))
+                        helper._log_purge_event("stickers", "deleted", guild.id, ctx.user.id, st.id, st.name, "Manual purge")
+                    except discord.Forbidden as e:
+                        skipped += 1
+                        helper._log_purge_event("stickers", "skipped", guild.id, ctx.user.id, st.id, st.name, f"Manual purge: {e}")
+                    except Exception as e:
+                        failed += 1
+                        helper._log_purge_event("stickers", "failed", guild.id, ctx.user.id, st.id, st.name, f"Manual purge: {e}")
+
+                if unmapped_only:
+                    if deleted_ids:
+                        placeholders = ",".join("?" * len(deleted_ids))
+                        self.db.conn.execute(
+                            f"DELETE FROM sticker_mappings WHERE cloned_sticker_id IN ({placeholders})",
+                            (*deleted_ids,)
+                        )
+                        self.db.conn.commit()
+                else:
+                    self.db.conn.execute("DELETE FROM sticker_mappings")
+                    self.db.conn.commit()
+
+            # =============================
+            # ROLES
+            # =============================
+            elif kind == "roles":
+                me, top_role, roles = await helper._resolve_me_and_top(guild)
+                if not me or not top_role:
+                    return await ctx.followup.send(
+                        embed=self._err_embed("Top role not found", "Could not resolve my top role. Try again later."),
+                        ephemeral=True,
+                    )
+                if not me.guild_permissions.manage_roles:
+                    return await ctx.followup.send(
+                        embed=self._err_embed("Missing permission", "I need **Manage Roles**."),
+                        ephemeral=True,
+                    )
+
+                def _undeletable(r: discord.Role) -> bool:
+                    prem = getattr(r, "is_premium_subscriber", None)
+                    return bool(r.is_default() or r.managed or (prem() if callable(prem) else False))
+
+                eligible = [r for r in roles if not _undeletable(r) and r < top_role]
+                for role in sorted(eligible, key=lambda r: r.position):
+                    if unmapped_only and _is_mapped("roles", role.id):
+                        skipped += 1
+                        helper._log_purge_event("roles", "skipped", guild.id, ctx.user.id, role.id, role.name,
+                                                "Unmapped-only mode: mapped in DB")
+                        continue
+                    try:
+                        await self.ratelimit.acquire(RL_ROLE)
+                        await role.delete(reason=f"Purge by {ctx.user.id}")
+                        deleted += 1
+                        deleted_ids.append(int(role.id))
+                        helper._log_purge_event("roles", "deleted", guild.id, ctx.user.id, role.id, role.name, "Manual purge")
+                    except discord.Forbidden as e:
+                        skipped += 1
+                        helper._log_purge_event("roles", "skipped", guild.id, ctx.user.id, role.id, role.name, f"Manual purge: {e}")
+                    except Exception as e:
+                        failed += 1
+                        helper._log_purge_event("roles", "failed", guild.id, ctx.user.id, role.id, role.name, f"Manual purge: {e}")
+
+                if unmapped_only:
+                    if deleted_ids:
+                        placeholders = ",".join("?" * len(deleted_ids))
+                        self.db.conn.execute(
+                            f"DELETE FROM role_mappings WHERE cloned_role_id IN ({placeholders})",
+                            (*deleted_ids,)
+                        )
+                        self.db.conn.commit()
+                else:
+                    self.db.conn.execute("DELETE FROM role_mappings")
+                    self.db.conn.commit()
+
+            # =============================
+            # Finalize
+            # =============================
+            summary = (
+                f"**Target:** `{kind}`\n"
+                f"**Mode:** `{'unmapped_only' if unmapped_only else 'ALL'}`\n"
+                f"**Deleted:** {deleted}\n**Skipped:** {skipped}\n**Failed:** {failed}"
+            )
+            color = discord.Color.green() if failed == 0 else discord.Color.orange()
+            await self._reply_or_dm(
+                ctx,
+                embed=self._ok_embed("Purge complete", summary, color=color),
+                ephemeral=True,
+                mention_on_channel_fallback=True,
+            )
+
+        except Exception as e:
+            err_text = f"{type(e).__name__}: {e}"
+            await self._reply_or_dm(
+                ctx,
+                embed=self._err_embed("Purge failed", err_text),
+                ephemeral=True,
+                mention_on_channel_fallback=True,
+            )
+
+
+    @commands.slash_command(
+        name="role_block",
+        description="Block a role from being cloned/updated. Provide either the cloned role (picker) or its ID.",
+        guild_ids=[GUILD_ID],
+    )
+    async def role_block(
+        self,
+        ctx: discord.ApplicationContext,
+        role: discord.Role = Option(discord.Role, "Pick the CLONED role to block", required=False),
+        role_id: str = Option(str, "CLONED role ID to block", required=False, min_length=17, max_length=20),
+    ):
+        """
+        Adds a role to the block list using its original_role_id from the DB.
+        If a clone exists, it is deleted and its mapping removed to enforce the block.
+        """
+        await ctx.defer(ephemeral=True)
+
+        if not role and not role_id:
+            return await ctx.followup.send(
+                embed=self._err_embed("Missing input", "Provide either a role selection or a role ID."),
+                ephemeral=True,
+            )
+        if role and role_id:
+            return await ctx.followup.send(
+                embed=self._err_embed("Too many inputs", "Provide only one of: role OR role_id."),
+                ephemeral=True,
+            )
+
+        # Resolve cloned role id
+        try:
+            cloned_id = int(role.id if role else role_id)
+        except ValueError:
+            return await ctx.followup.send(
+                embed=self._err_embed("Invalid ID", f"`{role_id}` is not a valid numeric role ID."),
+                ephemeral=True,
+            )
+
+        # Find original via mapping
+        mapping = self.db.get_role_mapping_by_cloned_id(cloned_id)
+        if not mapping:
+            return await ctx.followup.send(
+                embed=self._err_embed(
+                    "Mapping not found",
+                    "I couldn't find a role mapping for that cloned role. Make sure this role was created by Copycord."
+                ),
+                ephemeral=True,
+            )
+
+        original_role_id = int(mapping["original_role_id"])
+        original_role_name = mapping["original_role_name"]
+
+        newly_added = self.db.add_role_block(original_role_id)
+        # Enforce the block immediately: delete clone if present and remove mapping
+        g = ctx.guild
+        cloned_obj = g.get_role(cloned_id) if g else None
+
+        # Try to delete if safe
+        deleted = False
+        if cloned_obj:
+            me = g.me if g else None
+            bot_top = me.top_role.position if me and me.top_role else 0
+            if (not cloned_obj.is_default()) and (not cloned_obj.managed) and cloned_obj.position < bot_top:
+                try:
+                    await self.ratelimit.acquire(ActionType.ROLE)
+                    await cloned_obj.delete(reason=f"Blocked by {ctx.user.id}")
+                    deleted = True
+                except Exception as e:
+                    logger.warning("[role_block] Failed deleting role %s (%d): %s",
+                                getattr(cloned_obj, 'name', '?'), cloned_id, e)
+
+        # Always drop the mapping so it won't be updated/re-created
+        self.db.delete_role_mapping(original_role_id)
+
+        if newly_added:
+            title = "Role Blocked"
+            desc = f"**{original_role_name}** (`orig:{original_role_id}`) is now blocked.\n" \
+                f"{'🗑️ Deleted cloned role.' if deleted else '↩️ No clone deleted (not found / not permitted).'}\n" \
+                "It will be skipped during future role syncs."
+            color = discord.Color.green()
+        else:
+            title = "Role Already Blocked"
+            desc = f"**{original_role_name}** (`orig:{original_role_id}`) was already on the block list.\n" \
+                f"{'🗑️ Deleted cloned role.' if deleted else '↩️ No clone deleted (not found / not permitted).'}"
+            color = discord.Color.blurple()
+
+        await ctx.followup.send(embed=self._ok_embed(title, desc, color=color), ephemeral=True)
+
+    @commands.slash_command(
+        name="role_block_clear",
+        description="Clear the entire role block list (allows previously blocked roles to be synced again).",
+        guild_ids=[GUILD_ID],
+    )
+    async def role_block_clear(self, ctx: discord.ApplicationContext):
+        """
+        Clears all entries in the role block list.
+        This does NOT recreate any roles automatically; it only removes the block entries.
+        Future role syncs may recreate those roles if they exist on the source.
+        """
+        await ctx.defer(ephemeral=True)
+
+        try:
+            removed = self.db.clear_role_blocks()
+            if removed == 0:
+                return await ctx.followup.send(
+                    embed=self._ok_embed(
+                        "Role Block List",
+                        "The block list is already empty."
+                    ),
+                    ephemeral=True,
+                )
+
+            await ctx.followup.send(
+                embed=self._ok_embed(
+                    "Role Block List Cleared",
+                    f"Removed **{removed}** entr{'y' if removed == 1 else 'ies'} from the role block list.\n"
+                    "Previously blocked roles may be recreated on the next role sync if they still exist on the source."
+                ),
+                ephemeral=True,
+            )
+        except Exception as e:
+            await ctx.followup.send(
+                embed=self._err_embed(
+                    "Failed to Clear Block List",
+                    f"An error occurred while clearing the role block list:\n`{e}`"
+                ),
+                ephemeral=True,
+            )
 
 
 def setup(bot: commands.Bot):

@@ -1,3 +1,12 @@
+# =============================================================================
+#  Copycord
+#  Copyright (C) 2021 github.com/Copycord
+#
+#  This source code is released under the GNU Affero General Public License
+#  version 3.0. A copy of the license is available at:
+#  https://www.gnu.org/licenses/agpl-3.0.en.html
+# =============================================================================
+
 from __future__ import annotations
 from collections import deque
 import contextlib
@@ -13,7 +22,7 @@ import re
 import time
 import logging
 from typing import Dict, List, Set, Literal
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Body, status
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Body, status, HTTPException
 from fastapi.responses import (
     RedirectResponse,
     PlainTextResponse,
@@ -1412,6 +1421,30 @@ async def save_filters(request: Request):
     )
     return RedirectResponse("/", status_code=303)
 
+@app.post("/api/filters/blacklist", response_class=JSONResponse)
+async def api_blacklist_add(payload: dict = Body(...)):
+    try:
+        scope = str(payload.get("scope", "")).strip().lower()
+        if scope not in ("category", "channel"):
+            raise ValueError("invalid-scope")
+
+        raw_id = str(payload.get("obj_id", "")).strip()
+        if not raw_id.isdigit():
+            raise ValueError("invalid-obj_id")
+        obj_id = int(raw_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid-input")
+
+    try:
+        db.add_filter("exclude", scope, obj_id)
+        asyncio.create_task(
+            _ws_cmd(CLIENT_AGENT_URL, {"type": "filters_reload"}, timeout=1.0)
+        )
+        return {"ok": True, "scope": scope, "obj_id": str(obj_id)}
+
+    except Exception:
+        raise HTTPException(status_code=500, detail="db-failure")
+
 
 def _read_env() -> Dict[str, str]:
     vals = DEFAULTS.copy()
@@ -1477,44 +1510,49 @@ async def channels_page(request: Request):
         },
     )
 
-
 @app.get("/api/channels", response_class=JSONResponse)
 async def channels_api():
     chans = [dict(r) for r in db.get_all_channel_mappings()]
-    cats = {
-        int(r["original_category_id"]): r["original_category_name"]
-        for r in db.get_all_category_mappings()
-    }
+    cat_rows = [dict(r) for r in db.get_all_category_mappings()]
+
+    # Maps for category lookups
+    cats_by_id = {int(r["original_category_id"]): r for r in cat_rows}
+
+    out = []
     for ch in chans:
         pid = ch.get("original_parent_category_id")
-        ch["category_name"] = cats.get(int(pid)) if pid not in (None, "", 0) else None
+        pid_int = int(pid) if pid not in (None, "", 0) else None
 
-    out = [
-        {
-            "original_channel_id": (
-                str(ch["original_channel_id"])
-                if ch.get("original_channel_id") is not None
-                else ""
-            ),
-            "original_channel_name": ch.get("original_channel_name") or "",
-            "cloned_channel_id": (
-                str(ch["cloned_channel_id"])
-                if ch.get("cloned_channel_id") is not None
-                else None
-            ),
-            "channel_type": int(ch.get("channel_type", 0)),
-            "category_name": ch.get("category_name"),
-            "original_parent_category_id": (
-                str(ch["original_parent_category_id"])
-                if ch.get("original_parent_category_id") not in (None, "", 0)
-                else None
-            ),
-            "channel_webhook_url": ch.get("channel_webhook_url"),
-            "clone_channel_name": ch.get("clone_channel_name") or None,
-        }
-        for ch in chans
-    ]
+        cat_info = cats_by_id.get(pid_int, {})
+        original_cat_name = cat_info.get("original_category_name")
+        cloned_cat_name   = cat_info.get("cloned_category_name") or None
+        cloned_cat_id     = (
+            str(cat_info.get("cloned_category_id"))
+            if cat_info.get("cloned_category_id") not in (None, "", 0)
+            else None
+        )
+
+        out.append(
+            {
+                "original_channel_id": str(ch["original_channel_id"]) if ch.get("original_channel_id") else "",
+                "original_channel_name": ch.get("original_channel_name") or "",
+                "cloned_channel_id": str(ch["cloned_channel_id"]) if ch.get("cloned_channel_id") else None,
+                "channel_type": int(ch.get("channel_type", 0)),
+
+                # category info
+                "category_name": original_cat_name,
+                "original_category_name": original_cat_name,
+                "cloned_category_name": cloned_cat_name,
+                "original_parent_category_id": str(pid_int) if pid_int else None,
+                "cloned_category_id": cloned_cat_id,   # <-- NEW FIELD
+
+                "channel_webhook_url": ch.get("channel_webhook_url"),
+                "clone_channel_name": ch.get("clone_channel_name") or None,
+            }
+        )
+
     return {"items": out}
+
 
 
 @app.post("/api/backfill/start", response_class=JSONResponse)
@@ -1914,10 +1952,84 @@ async def api_channels_customize(payload: dict = Body(...)):
         }
     )
 
+@app.post("/api/categories/customize", response_class=JSONResponse)
+async def api_categories_customize(payload: dict = Body(...)):
+    """
+    Set or clear a category's custom display name.
+    """
+
+    import unicodedata
+
+    def _norm_display(s):
+        if s is None:
+            return None
+        s = unicodedata.normalize("NFKC", str(s)).strip()
+        return s if s else None
+
+    ocid = None
+    if "original_category_id" in payload:
+        try:
+            ocid = int(payload.get("original_category_id"))
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid-original_category_id"}, status_code=400)
+    else:
+        name = _norm_display(payload.get("category_name"))
+        ocid = db.resolve_original_category_id_by_name(name) if name else None
+        if not ocid:
+            return JSONResponse({"ok": False, "error": "missing-or-unresolvable-category"}, status_code=400)
+
+    # Desired custom/pinned name (no slugging)
+    desired = _norm_display(payload.get("custom_category_name", payload.get("clone_category_name")))
+
+    try:
+        orig = db.get_original_category_name(ocid)
+    except Exception:
+        orig = None
+
+    same_as_original = False
+    if desired is not None and _norm_display(orig) == _norm_display(desired):
+        desired = None
+        same_as_original = True
+
+    try:
+        current_raw = db.get_clone_category_name(ocid)
+    except Exception:
+        current_raw = None
+
+    # Only update if different (compare on display-normalized text)
+    needs_update = _norm_display(current_raw) != _norm_display(desired)
+    if not needs_update:
+        LOGGER.info("Customize category | original_id=%s no change (kept=%r)", ocid, current_raw)
+        return JSONResponse({"ok": True, "changed": False, "normalized": desired is not None})
+
+    # Persist (store the exact user-facing text, or NULL to clear)
+    try:
+        db.set_category_clone_name(ocid, desired)
+        LOGGER.info(
+            "Customize category | original_id=%s updated to %r (orig=%r, was=%r)",
+            ocid, desired, orig, current_raw
+        )
+    except Exception as e:
+        LOGGER.exception("Failed to set cloned_category_name: %s", e)
+        return JSONResponse({"ok": False, "error": "db-failure"}, status_code=500)
+
+    should_nudge = not (desired is None and same_as_original)
+    if should_nudge:
+        try:
+            asyncio.create_task(_ws_cmd(CLIENT_AGENT_URL, {"type": "sitemap_request"}, timeout=1.0))
+        except Exception:
+            LOGGER.debug("WS sitemap_request dispatch failed", exc_info=True)
+
+    return JSONResponse({
+        "ok": True,
+        "changed": True,
+        "nudged": should_nudge,
+        "normalized_name": desired, 
+    })
 
 @app.get("/version")
 def get_version():
-    current = db.get_version() or CURRENT_VERSION
+    current = CURRENT_VERSION or db.get_version()
     latest = db.get_config("latest_tag", "")
     url = db.get_config("latest_url", "")
 

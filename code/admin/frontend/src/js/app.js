@@ -41,7 +41,6 @@
     const wrap = document.getElementById("footer-version");
     if (!wrap) return;
   
-    
     const link = document.getElementById("footer-version-link");
     const plain = document.getElementById("footer-version-text");
   
@@ -50,41 +49,34 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const v = await res.json();
   
-      const textWhenUpdate = `${v.latest}`;
-      const textWhenNormal = `Version ${v.current}`;
-  
       if (v.update_available) {
-        
         if (link) {
-          link.textContent = textWhenUpdate;
-          link.href = v.url;
-          link.classList.add("update-flash");
+          link.textContent = v.current || "dev";
+          link.classList.add("update-flash");  
+          link.href = v.url;              
           link.setAttribute("aria-label", "New update available");
         } else if (plain) {
-          plain.textContent = textWhenUpdate;
+          plain.textContent = v.current ? `Version ${v.current}` : "dev";
           plain.classList.add("update-flash");
           plain.style.cursor = "pointer";
           plain.onclick = () => window.open(v.url, "_blank", "noopener");
-        } else {
-          
-          const a = document.createElement("a");
-          a.id = "footer-version-link";
-          a.target = "_blank";
-          a.rel = "noopener";
-          a.className = "footer-link update-flash";
-          a.textContent = textWhenUpdate;
-          a.href = v.url;
-          wrap.innerHTML = "";
-          wrap.appendChild(a);
+        }
+  
+        const notice = document.getElementById("update-notice");
+        if (notice) {
+          notice.style.display = "block";
+          notice.textContent = "New Update Available";
+          notice.onclick = () => window.open(v.url, "_blank", "noopener");
         }
       } else {
-        
         if (link) {
           link.textContent = v.current || "dev";
           link.classList.remove("update-flash");
-          
+  
           const def = link.getAttribute("data-default-href");
-          link.href = def || `https://github.com/Copycord/Copycord/releases/tag/${v.current}`;
+          link.href =
+            def ||
+            `https://github.com/Copycord/Copycord/releases/tag/${v.current}`;
           link.setAttribute("aria-label", `Copycord ${v.current}`);
         } else if (plain) {
           plain.textContent = v.current ? `Version ${v.current}` : "dev";
@@ -92,15 +84,20 @@
           plain.onclick = null;
           plain.style.cursor = "";
         }
+  
+        const notice = document.getElementById("update-notice");
+        if (notice) {
+          notice.style.display = "none";
+          notice.onclick = null;
+        }
       }
     } catch (err) {
-      
       console.debug("Footer version check failed:", err);
     }
   }
+  
 
   (function initToasts() {
-    // Create the #toast-root if it doesn't exist
     function ensureToastRoot() {
       if (!document.getElementById("toast-root")) {
         const div = document.createElement("div");
@@ -128,7 +125,6 @@
 
       const shouldAnnounceNow = () => Date.now() - BOOT_TS > BOOT_MS;
 
-      // TTL'd sessionStorage helpers (persist across reloads briefly)
       function ssSet(key, value, ttlMs = 15000) {
         try {
           if (value == null) {
@@ -252,16 +248,6 @@
       window.clearAllToasts();
     });
   })();
-
-  function setToggleDisabled(on) {
-    const btn = document.getElementById("toggle-btn");
-    const form = document.getElementById("toggle-form");
-    if (form) form.dataset.locked = on ? "1" : "0";
-    if (btn) {
-      btn.disabled = on;
-      btn.classList.toggle("is-loading", on);
-    }
-  }
 
   function getCurrentRunning(data) {
     return !!(data.server?.running || data.client?.running);
@@ -422,33 +408,57 @@
   const logTitle = document.getElementById("log-title");
   const closeBtn = document.getElementById("log-close");
   const backdrop = modal ? modal.querySelector(".modal-backdrop") : null;
+  let LOG_LINES = [];
+  let LOG_QUERY = "";
 
   let es = null;
   let autoFollow = true;
   const THRESH = 24;
+
+  function renderLogView({ preserveScroll = false } = {}) {
+    if (!logBody) return;
+
+    const shouldStick =
+      logBody.scrollHeight - logBody.scrollTop - logBody.clientHeight <= THRESH;
+
+    const q = LOG_QUERY.trim().toLowerCase();
+    let view = LOG_LINES;
+
+    if (q) {
+      view = LOG_LINES.filter((l) => l.toLowerCase().includes(q));
+    }
+
+    logBody.textContent = view.length ? view.join("\n") + "\n" : "";
+
+    if (shouldStick || !preserveScroll) {
+      logBody.scrollTop = logBody.scrollHeight;
+    }
+  }
 
   function onScroll() {
     autoFollow =
       logBody.scrollHeight - logBody.scrollTop - logBody.clientHeight <= THRESH;
   }
 
+  const MAX_LINES = 10000;
+
   function appendLines(lines) {
-    const stick = autoFollow;
-    const frag = document.createDocumentFragment();
-    for (const l of lines)
-      frag.appendChild(document.createTextNode((l || "") + "\n"));
-    logBody.appendChild(frag);
-    if (stick) logBody.scrollTop = logBody.scrollHeight;
+    if (!Array.isArray(lines) || lines.length === 0) return;
+    for (const l of lines) {
+      LOG_LINES.push(String(l ?? ""));
+    }
+    if (LOG_LINES.length > MAX_LINES) {
+      LOG_LINES.splice(0, LOG_LINES.length - MAX_LINES);
+    }
+    renderLogView({ preserveScroll: true });
   }
 
-  const MAX_LINES = 10000;
   function appendLine(line) {
-    const shouldStick = autoFollow;
-    logBody.appendChild(document.createTextNode((line || "") + "\n"));
-    while (logBody.childNodes.length > MAX_LINES) {
-      logBody.removeChild(logBody.firstChild);
+    LOG_LINES.push(String(line ?? ""));
+    if (LOG_LINES.length > MAX_LINES) {
+      LOG_LINES.splice(0, LOG_LINES.length - MAX_LINES);
     }
-    if (shouldStick) logBody.scrollTop = logBody.scrollHeight;
+    renderLogView({ preserveScroll: true });
   }
 
   function openLogs(which) {
@@ -467,12 +477,44 @@
     setInert(modal, false);
     modal.setAttribute("aria-hidden", "false");
 
+    LOG_LINES = [];
+    LOG_QUERY = "";
+    renderLogView();
+
+    const qInput = document.getElementById("log-search-input");
+    if (qInput) {
+      qInput.value = "";
+
+      setTimeout(() => qInput.focus(), 0);
+
+      let t;
+      qInput.oninput = () => {
+        clearTimeout(t);
+        const val = qInput.value || "";
+        t = setTimeout(() => {
+          LOG_QUERY = val;
+          renderLogView();
+        }, 60);
+      };
+
+      qInput.onkeydown = (e) => {
+        if (e.key === "Escape") {
+          qInput.value = "";
+          LOG_QUERY = "";
+          renderLogView();
+          e.preventDefault();
+        }
+      };
+    }
+
     autoFollow = true;
     logBody.addEventListener("scroll", onScroll, { passive: true });
     const firstFocusable =
+      document.getElementById("log-search-input") ||
       modal.querySelector(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      ) || logBody;
+      ) ||
+      logBody;
     setTimeout(() => firstFocusable?.focus(), 0);
 
     let retryTimer = null;

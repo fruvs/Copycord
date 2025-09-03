@@ -40,6 +40,9 @@
   let lastFocusConfirm = null;
   let lastFocusVerify = null;
   let custChannel = null;
+  let menuContext = null;
+  let catPinByOrig = new Map();
+  let catOrigByEither = new Map();
 
   (function () {
     if (window.__toastInit) return;
@@ -74,6 +77,7 @@
 
   let data = [];
   let filtered = [];
+  let pinsByOrig = new Map();
   let menuForId = null;
   let wsIn;
   let wsOut;
@@ -83,6 +87,40 @@
   let lastDeleteAt = 0;
   let menuAnchorBtn = null;
   let bfCleanup = null;
+
+  function rebuildCategoryPinMaps(rows) {
+    catPinByOrig = new Map();
+    catOrigByEither = new Map();
+    for (const ch of rows || []) {
+      const orig = String(
+        ch.original_category_name ??
+          ch.category_original_name ??
+          ch.category_upstream_name ??
+          ch.category_name ??
+          ""
+      ).trim();
+
+      const pin = String(ch.cloned_category_name ?? "").trim();
+
+      if (orig) {
+        const oKey = orig.toLowerCase();
+        if (!catOrigByEither.has(oKey)) catOrigByEither.set(oKey, orig);
+        if (pin) catOrigByEither.set(pin.toLowerCase(), orig);
+      }
+      if (orig && pin && pin !== orig) {
+        catPinByOrig.set(orig, pin);
+      }
+    }
+
+    for (const [orig, pin] of pinsByOrig) {
+      if (!orig || !pin || pin === orig) continue;
+      catPinByOrig.set(orig, pin);
+      if (!catOrigByEither.has(orig.toLowerCase())) {
+        catOrigByEither.set(orig.toLowerCase(), orig);
+      }
+      catOrigByEither.set(pin.toLowerCase(), orig);
+    }
+  }
 
   function clearBackfillBootResidue() {
     for (const id of [...runningClones]) setCardLoading(id, false);
@@ -257,7 +295,7 @@
     btnSave.onclick = async (e) => {
       e.preventDefault();
       const body = {
-        original_channel_id: ch.original_channel_id,
+        original_channel_id: custChannel.original_channel_id,
         clone_channel_name: String(name.value || ""),
       };
       try {
@@ -290,6 +328,172 @@
     modal.removeAttribute("aria-hidden");
     modal.classList.add("show");
     modal.querySelector(".modal-content")?.focus?.({ preventScroll: true });
+  }
+
+  function openCustomizeCategoryDialog(
+    categoryName,
+    originalCategoryId = null
+  ) {
+    injectCustomizeCategoryModal();
+
+    const modal = document.getElementById("customize-cat-modal");
+    const back = modal.querySelector('[data-role="backdrop"]');
+    const dlg = modal.querySelector(".modal-content");
+    const nameInp = document.getElementById("customize-cat-name");
+    const btnSave = document.getElementById("customize-cat-save");
+    const btnClose = document.getElementById("customize-cat-close");
+    const titleEl = document.getElementById("customize-cat-title");
+
+    titleEl.textContent = `Customize`;
+    const resolvedOrig =
+      catOrigByEither.get(String(categoryName).toLowerCase()) || categoryName;
+    const pinned = catPinByOrig.get(resolvedOrig);
+    const initial = pinned && pinned.trim() ? pinned : resolvedOrig;
+    nameInp.value = initial;
+
+    function close() {
+      blurIfInside(modal);
+      setInert(modal, true);
+      modal.setAttribute("aria-hidden", "true");
+      modal.classList.remove("show");
+    }
+
+    btnClose.onclick = (e) => {
+      e?.preventDefault?.();
+      close();
+    };
+    back.onclick = (e) => {
+      if (e.target === back) close();
+    };
+
+    document.addEventListener(
+      "keydown",
+      function onEsc(e) {
+        if (e.key === "Escape") {
+          close();
+          document.removeEventListener("keydown", onEsc);
+        }
+      },
+      { once: true }
+    );
+
+    btnSave.onclick = async (e) => {
+      e.preventDefault();
+
+      const raw = String(nameInp.value || "").trim();
+      const body = originalCategoryId
+        ? {
+            original_category_id: Number(originalCategoryId),
+            custom_category_name: raw,
+          }
+        : {
+            category_name: String(categoryName),
+            custom_category_name: raw,
+          };
+
+      try {
+        const res = await fetch("/api/categories/customize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || json?.ok === false) {
+          window.showToast(json?.error || "Failed to save.", { type: "error" });
+          return;
+        }
+        window.showToast("Saved category customization.", { type: "success" });
+        close();
+        try {
+          await load();
+        } catch {}
+      } catch {
+        window.showToast("Network error saving customization.", {
+          type: "error",
+        });
+      }
+    };
+
+    setInert(modal, false);
+    modal.removeAttribute("aria-hidden");
+    modal.classList.add("show");
+    dlg?.focus?.({ preventScroll: true });
+  }
+
+  function tooltipForChannel(orig, custom) {
+    if (!custom || !custom.trim() || custom === orig) return "";
+    return `Cloned channel = #${orig}\nCustomized channel = #${custom}`;
+  }
+
+  function tooltipForCategory(orig, pin) {
+    if (!pin || pin.trim() === "" || pin === orig) return "";
+    return `Cloned category = ${orig}\nCustomized category = ${pin}`;
+  }
+
+  function updateCategoryChipUI(originalName, pinnedName) {
+    const sel = `.cat-chip[data-cat-name="${
+      window.CSS && CSS.escape
+        ? CSS.escape(originalName)
+        : String(originalName).replace(/"/g, '\\"')
+    }"]`;
+
+    const chip = document.querySelector(sel);
+    if (!chip) return;
+
+    const isOrphan = chip.classList.contains("badge-orphan");
+
+    const display = pinnedName && pinnedName.trim() ? pinnedName : originalName;
+
+    chip.innerHTML = `
+      ${escapeHtml(display)}
+      <button class="cat-menu-trigger" aria-haspopup="menu" aria-controls="ch-menu" aria-label="Category menu" type="button">⋯</button>
+    `;
+
+    chip.classList.toggle(
+      "badge-custom",
+      !!(pinnedName && pinnedName.trim() && pinnedName !== originalName)
+    );
+
+    const tip = tooltipForCategory(originalName, pinnedName);
+    if (tip) chip.setAttribute("title", tip);
+    else chip.removeAttribute("title");
+
+    chip.setAttribute("data-cat-name", originalName);
+  }
+
+  function injectCustomizeCategoryModal() {
+    if (document.getElementById("customize-cat-modal")) return;
+
+    const wrap = document.createElement("div");
+    wrap.id = "customize-cat-modal";
+    wrap.className = "modal";
+    wrap.setAttribute("aria-hidden", "true");
+
+    wrap.innerHTML = `
+      <div class="modal-backdrop" data-role="backdrop"></div>
+      <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="customize-cat-title" tabindex="-1">
+        <div class="modal-header">
+          <h3 id="customize-cat-title">Customize category</h3>
+          <button id="customize-cat-close" class="icon-btn verify-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <label for="customize-cat-name" class="label has-tip">
+            Custom category name
+            <button class="info-dot" aria-describedby="tip-custom-cat" type="button"></button>
+            <div id="tip-custom-cat" class="tip-bubble" aria-hidden="true" role="tooltip">
+              Set a custom category name. Leave empty to use the original.
+            </div>
+          </label>
+          <input id="customize-cat-name" class="input" type="text" placeholder="Leave empty to use original name" />
+        </div>
+        <div class="btns">
+          <button id="customize-cat-save" class="btn btn-primary" type="button">Save</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
   }
 
   (function injectCustomizeModal() {
@@ -371,7 +575,6 @@
   setHeaderHeightVar();
   window.addEventListener("resize", setHeaderHeightVar, { passive: true });
 
-  // ---- Backfill / clone run-state ----
   const runningClones = new Set(
     (() => {
       try {
@@ -493,10 +696,13 @@
 
   async function load() {
     try {
-      const res = await fetch("/api/channels");
-      const json = await res.json();
-      data = json.items || [];
+      const chRes = await fetch("/api/channels");
+      const chJson = await chRes.json();
+      data = chJson.items || [];
+      pinsByOrig = new Map();
+      data = chJson.items || [];
       filtered = [...data];
+      rebuildCategoryPinMaps(data);
       render();
     } catch (e) {
       console.error("Failed to load channels", e);
@@ -577,18 +783,41 @@
     }
   };
 
+  function getOriginalCategoryFromRow(ch) {
+    const v = String(
+      ch.original_category_name ??
+        ch.category_original_name ??
+        ch.category_upstream_name ??
+        ch.category_name ??
+        ""
+    ).trim();
+    return v || UNGROUPED_LABEL;
+  }
+
   function applyFilterAndSort() {
     const q = normalize(search.value);
+
     filtered = !q
       ? [...data]
-      : data.filter(
-          (ch) =>
+      : data.filter((ch) => {
+          const origCatRaw = getOriginalCategoryFromRow(ch);
+          const origCat = (origCatRaw && origCatRaw.trim()) || "";
+          const resolvedOrig = origCat || UNGROUPED_LABEL;
+          const pinnedCat = catPinByOrig.get(resolvedOrig) || "";
+
+          const catName =
+            (ch.category_name && ch.category_name.trim()) || UNGROUPED_LABEL;
+
+          return (
             normalize(ch.original_channel_name).includes(q) ||
             normalize(ch.clone_channel_name).includes(q) ||
-            normalize(ch.category_name).includes(q) ||
+            normalize(catName).includes(q) ||
+            normalize(resolvedOrig).includes(q) ||
+            normalize(pinnedCat).includes(q) ||
             normalize(ch.original_channel_id).includes(q) ||
             normalize(ch.cloned_channel_id).includes(q)
-        );
+          );
+        });
   }
 
   function matches(str, q) {
@@ -662,10 +891,6 @@
   }
 
   function compareCategoryNames(aName, bName) {
-    const UN = UNGROUPED_LABEL;
-    const aUng = aName === UN,
-      bUng = bName === UN;
-    if (aUng !== bUng) return aUng ? 1 : -1;
     return String(aName || "").localeCompare(String(bName || ""));
   }
 
@@ -759,11 +984,7 @@
     let entries = [...merged.entries()];
     if (sortMode === "category") {
       entries.sort(([aName], [bName]) => compareCategoryNames(aName, bName));
-      if (sortDir === "desc") {
-        const tail = entries.filter(([n]) => n === UNGROUPED_LABEL);
-        const head = entries.filter(([n]) => n !== UNGROUPED_LABEL).reverse();
-        entries = [...head, ...tail];
-      }
+      if (sortDir === "desc") entries.reverse();
     }
 
     const baseCmp = makeChannelCmp(sortMode);
@@ -789,27 +1010,42 @@
       const section = document.createElement("section");
       section.className = "ch-section";
 
+      const resolvedOrig =
+        catOrigByEither.get(String(cat).toLowerCase()) || cat;
+      const pin = catPinByOrig.get(resolvedOrig);
+      const isCustom = !!(pin && pin.trim() && pin !== resolvedOrig);
+      const displayCat = isCustom ? pin : resolvedOrig;
+      const tooltip = tooltipForCategory(resolvedOrig, pin);
+      const isUncategorized = resolvedOrig === UNGROUPED_LABEL;
+
       section.innerHTML = `
         <div class="ch-section-head">
           <h3 class="ch-section-title ${
             isOrphanCategory ? "orphan-title" : ""
           }">
             <span class="badge cat-chip ${
-              isOrphanCategory ? "badge-orphan" : "good"
-            }"
+              isOrphanCategory
+                ? "badge-orphan"
+                : isCustom
+                ? "badge-custom"
+                : "good"
+            } ${isCustom ? "is-custom" : ""}"
               ${
                 isOrphanCategory
-                  ? `data-orphan-cat-id="${escapeAttr(
-                      orphanCatId
-                    )}" data-cat-name="${escapeAttr(cat)}"`
-                  : ""
-              }>
-              ${escapeHtml(cat)}
+                  ? 'data-orphan-cat-id="' +
+                    escapeAttr(orphanCatId) +
+                    '" data-cat-name="' +
+                    escapeAttr(resolvedOrig) +
+                    '"'
+                  : 'data-cat-name="' + escapeAttr(resolvedOrig) + '"'
+              }
+              ${tooltip ? 'title="' + escapeAttr(tooltip) + '"' : ""}
+            >
+              ${escapeHtml(displayCat)}
               ${
-                isOrphanCategory
-                  ? `<button class="chip-x orphan-cat-del" aria-label="Delete orphan category ${escapeAttr(
-                      cat
-                    )}" title="Delete orphan category" type="button">×</button>`
+                !isUncategorized
+                  ? `<button class="cat-menu-trigger" aria-haspopup="true"
+                       aria-controls="ch-menu" aria-label="Category menu" type="button">⋯</button>`
                   : ""
               }
             </span>
@@ -831,10 +1067,18 @@
           card.dataset.orphan = "1";
           card.dataset.kind = "channel";
         }
-
         const isCustomized = !!(
           ch.clone_channel_name && String(ch.clone_channel_name).trim()
         );
+
+        const displayName = isCustomized
+          ? ch.clone_channel_name
+          : ch.original_channel_name;
+        const tip = tooltipForChannel(
+          ch.original_channel_name,
+          ch.clone_channel_name
+        );
+
         const type = chTypeLabel(ch.channel_type);
 
         const cloneChip = ch.cloned_channel_id
@@ -846,44 +1090,39 @@
           : "";
 
         card.innerHTML = `
-            <div class="ch-head">
-              <div class="ch-name">
-                <span class="ch-original-name" title="${escapeAttr(
-                  ch.original_channel_name
-                )}">
-                  # ${escapeHtml(ch.original_channel_name)}
-                </span>
-                ${
-                  isCustomized
-                    ? `<span class="ch-custom-name" title="${escapeAttr(
-                        ch.clone_channel_name
-                      )}">
-                       #${escapeHtml(ch.clone_channel_name)}
-                     </span>`
-                    : ""
-                }
-              </div>
-              <div class="ch-top-right">
-                <button class="icon-btn ch-menu-btn" aria-haspopup="menu" aria-controls="ch-menu" aria-label="Channel menu">⋯</button>
-              </div>
-            </div>
-            <div class="ch-meta">
-              <span class="badge muted" title="Channel type">${type}</span>
+        <div class="ch-head">
+          <div class="ch-name">
+            <span class="ch-display-name ${isCustomized ? "is-custom" : ""}"
               ${
-                isOrphanChannel
-                  ? `<span class="badge badge-orphan">Orphan</span>`
-                  : cloneChip
+                tip
+                  ? `title="${escapeAttr(tip)}"`
+                  : `title="${escapeAttr(ch.original_channel_name)}"`
               }
-            </div>
-            <div class="ch-ids">
-              <span title="Original channel ID">${ch.original_channel_id}</span>
-              ${
-                ch.cloned_channel_id
-                  ? `<span class="muted" title="Cloned channel ID">→ ${ch.cloned_channel_id}</span>`
-                  : ""
-              }
-            </div>
-          `;
+            >
+              # ${escapeHtml(displayName)}
+            </span>
+          </div>
+          <div class="ch-top-right">
+            <button class="icon-btn ch-menu-btn" aria-haspopup="menu" aria-controls="ch-menu" aria-label="Channel menu">⋯</button>
+          </div>
+        </div>
+        <div class="ch-meta">
+          <span class="badge muted" title="Channel type">${type}</span>
+          ${
+            isOrphanChannel
+              ? `<span class="badge badge-orphan">Orphan</span>`
+              : cloneChip
+          }
+        </div>
+        <div class="ch-ids">
+          <span title="Original channel ID">${ch.original_channel_id}</span>
+          ${
+            ch.cloned_channel_id
+              ? `<span class="muted" title="Cloned channel ID">→ ${ch.cloned_channel_id}</span>`
+              : ""
+          }
+        </div>
+      `;
         if (cloneIsRunning(ch.original_channel_id)) {
           card.classList.add("is-cloning");
           card.setAttribute("aria-busy", "true");
@@ -896,27 +1135,44 @@
     }
   }
 
-  function showMenu(btn, channelId) {
-    const isLocked = cloneIsLocked(channelId);
-    const cloneItem = menu.querySelector('[data-action="clone"]');
-    if (cloneItem) {
-      cloneItem.disabled = isLocked;
-      cloneItem.setAttribute("aria-disabled", isLocked ? "true" : "false");
-      cloneItem.title = isLocked
-        ? "Cloning still in progress"
-        : "Clone messages";
-      cloneItem.classList.toggle("is-disabled", isLocked);
-    }
+  function showMenu(btn, ctx) {
+    const legacyIsChannel = typeof ctx === "string" || typeof ctx === "number";
+    if (legacyIsChannel) ctx = { type: "channel", id: String(ctx) };
+
     if (menuAnchorBtn && menuAnchorBtn !== btn) {
       menuAnchorBtn.setAttribute("aria-expanded", "false");
     }
     menuAnchorBtn = btn;
     menuAnchorBtn.setAttribute("aria-expanded", "true");
-    menuForId = channelId;
 
-    const card = btn.closest(".ch-card");
-    const isOrphan = card?.dataset.orphan === "1";
-    const orphanKind = card?.dataset.kind || "channel";
+    menuContext = ctx;
+    menu.hidden = false;
+    menu.classList.add("customize-skin");
+
+    const LOCAL_UNGROUPED = UNGROUPED_LABEL;
+
+    const isChannel = ctx.type === "channel";
+    const isCategory = ctx.type === "category";
+    const isOrphanCat = ctx.type === "orphan-cat";
+
+    let isOrphanChannel = false;
+    if (isChannel && ctx.id != null) {
+      try {
+        const selId = String(ctx.id);
+        const card = document.querySelector(
+          `.ch-card[data-cid="${
+            window.CSS && CSS.escape
+              ? CSS.escape(selId)
+              : selId.replace(/"/g, '\\"')
+          }"]`
+        );
+        isOrphanChannel =
+          card?.dataset?.orphan === "1" || !!card?.dataset?.orphan;
+      } catch {}
+    }
+
+    const cloneItem = menu.querySelector('[data-action="clone"]');
+    menuForId = isChannel ? String(ctx.id) : null;
 
     let customizeItem = menu.querySelector('[data-act="customize"]');
     if (!customizeItem) {
@@ -926,65 +1182,487 @@
       customizeItem.role = "menuitem";
       customizeItem.type = "button";
       customizeItem.textContent = "Customize";
-    }
-
-    // PREPEND as the first item
-    if (menu.firstChild !== customizeItem) {
       menu.insertBefore(customizeItem, menu.firstChild);
     }
-    customizeItem.hidden = false;
 
-    const ch = (filtered || data || []).find(
-      (c) => String(c.original_channel_id) === String(channelId)
+    let customizeCatItem = menu.querySelector(
+      '[data-act="customize-category"]'
     );
-    const isClone = ch && ch.cloned_channel_id; // truthy only for clones
-    customizeItem.hidden = !isClone;
-
-    let delItem = menu.querySelector('[data-act="delete-orphan"]');
-    if (!delItem) {
-      delItem = document.createElement("button");
-      delItem.className = "ctxmenu-item";
-      delItem.dataset.act = "delete-orphan";
-      delItem.role = "menuitem";
-      delItem.type = "button";
-      delItem.textContent = "Delete orphan";
-      menu.appendChild(delItem);
+    if (!customizeCatItem) {
+      customizeCatItem = document.createElement("button");
+      customizeCatItem.className = "ctxmenu-item";
+      customizeCatItem.dataset.act = "customize-category";
+      customizeCatItem.role = "menuitem";
+      customizeCatItem.type = "button";
+      customizeCatItem.textContent = "Customize category";
+      const after = menu.querySelector('[data-act="customize"]');
+      if (after?.nextSibling)
+        menu.insertBefore(customizeCatItem, after.nextSibling);
+      else menu.insertBefore(customizeCatItem, menu.firstChild);
     }
-    delItem.hidden = !isOrphan;
-    delItem.dataset.kind = orphanKind;
+    customizeCatItem.hidden = !(isCategory && !isOrphanCat);
+    customizeCatItem.setAttribute(
+      "aria-hidden",
+      (!!customizeCatItem.hidden).toString()
+    );
+
+    let delOrphanChItem = menu.querySelector('[data-act="delete-orphan"]');
+    if (!delOrphanChItem) {
+      delOrphanChItem = document.createElement("button");
+      delOrphanChItem.className = "ctxmenu-item";
+      delOrphanChItem.dataset.act = "delete-orphan";
+      delOrphanChItem.role = "menuitem";
+      delOrphanChItem.type = "button";
+      delOrphanChItem.textContent = "Delete orphan";
+      menu.appendChild(delOrphanChItem);
+    }
+    delOrphanChItem.hidden = !isOrphanChannel;
+    if (!delOrphanChItem.hidden) delOrphanChItem.dataset.kind = "channel";
+
+    let delOrphanCatItem = menu.querySelector('[data-act="delete-orphan-cat"]');
+    if (!delOrphanCatItem) {
+      delOrphanCatItem = document.createElement("button");
+      delOrphanCatItem.className = "ctxmenu-item";
+      delOrphanCatItem.dataset.act = "delete-orphan-cat";
+      delOrphanCatItem.role = "menuitem";
+      delOrphanCatItem.type = "button";
+      delOrphanCatItem.textContent = "Delete orphan category";
+      menu.appendChild(delOrphanCatItem);
+    }
+    delOrphanCatItem.hidden = !isOrphanCat;
 
     if (cloneItem) {
-      const hideClone = isOrphan === true;
+      const isLocked = isChannel && cloneIsLocked(ctx.id);
+      const hideClone = !isChannel || isOrphanChannel;
       cloneItem.hidden = hideClone;
       cloneItem.setAttribute("aria-hidden", hideClone ? "true" : "false");
       cloneItem.disabled = hideClone || isLocked;
       cloneItem.setAttribute(
         "aria-disabled",
-        hideClone || isLocked ? "true" : "false"
+        cloneItem.disabled ? "true" : "false"
       );
       cloneItem.title = hideClone
-        ? "Cannot clone an orphan channel"
+        ? ""
         : isLocked
         ? "Backfill still in progress"
         : "Clone messages";
-      cloneItem.classList.toggle("is-disabled", hideClone || isLocked);
+      cloneItem.classList.toggle("is-disabled", cloneItem.disabled);
     }
 
-    menu.hidden = false;
+    if (isChannel) {
+      const ch = (filtered || data || []).find(
+        (c) => String(c.original_channel_id) === String(ctx.id)
+      );
+      const isClone = !!(ch && ch.cloned_channel_id);
+      customizeItem.hidden = !isClone;
+    } else {
+      customizeItem.hidden = true;
+    }
+    customizeItem.setAttribute(
+      "aria-hidden",
+      (!!customizeItem.hidden).toString()
+    );
 
-    menu.style.position = "fixed";
-    const gap = 6;
-    const pad = 12;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    function findChannelRowByOrigId(origId) {
+      const k = String(origId || "");
+      return (
+        (data || []).find((r) => String(r.original_channel_id) === k) || null
+      );
+    }
 
+    let sep = menu.querySelector('[data-act="sep-general"]');
+    if (!sep) {
+      sep = document.createElement("div");
+      sep.className = "ctxmenu-sep";
+      sep.dataset.act = "sep-general";
+      menu.appendChild(sep);
+    }
+
+    let blCh = menu.querySelector('[data-act="bl-channel"]');
+    if (!blCh) {
+      blCh = document.createElement("button");
+      blCh.className = "ctxmenu-item";
+      blCh.dataset.act = "bl-channel";
+      blCh.role = "menuitem";
+      blCh.type = "button";
+      blCh.textContent = "Add channel to blacklist";
+      blCh.setAttribute("aria-label", "Add channel to blacklist");
+      blCh.addEventListener("click", () => {
+        const row = findChannelRowByOrigId(menuForId);
+        const originalId = row?.original_channel_id;
+        const displayName =
+          (row?.clone_channel_name && row.clone_channel_name.trim()) ||
+          row?.original_channel_name ||
+          "Channel";
+
+        if (!originalId) {
+          window.showToast("Could not resolve channel ID.", { type: "error" });
+          hideMenu({ restoreFocus: false });
+          return;
+        }
+
+        hideMenu({ restoreFocus: false });
+        openConfirm(
+          {
+            title: "Add channel to blacklist?",
+            body: `This will blacklist <b>#${escapeHtml(
+              displayName
+            )}</b> <span class="muted">(${escapeHtml(
+              String(originalId)
+            )})</span>.`,
+            okText: "Add to blacklist",
+          },
+          async () => {
+            try {
+              const res = await fetch("/api/filters/blacklist", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                body: JSON.stringify({
+                  scope: "channel",
+                  obj_id: String(originalId),
+                }),
+              });
+              const j = await res.json().catch(() => ({}));
+              if (!res.ok || j?.ok === false)
+                throw new Error(j?.detail || j?.error || "failed");
+              window.showToast("Channel added to blacklist.", {
+                type: "success",
+              });
+            } catch {
+              window.showToast("Failed to add to blacklist.", {
+                type: "error",
+              });
+            }
+          }
+        );
+      });
+      menu.appendChild(blCh);
+    }
+
+    let copyOrig = menu.querySelector('[data-act="copy-orig-id"]');
+    if (!copyOrig) {
+      copyOrig = document.createElement("button");
+      copyOrig.className = "ctxmenu-item";
+      copyOrig.dataset.act = "copy-orig-id";
+      copyOrig.role = "menuitem";
+      copyOrig.type = "button";
+      copyOrig.textContent = "Copy original channel ID";
+      copyOrig.setAttribute("aria-label", "Copy original ID");
+      copyOrig.addEventListener("click", async () => {
+        if (!menuForId) return;
+        try {
+          await navigator.clipboard.writeText(String(menuForId));
+          window.showToast("Copied original channel ID to clipboard.", {
+            type: "success",
+          });
+        } catch {
+          window.showToast("Could not copy channel ID.", { type: "error" });
+        }
+        hideMenu({ restoreFocus: false });
+      });
+      menu.appendChild(copyOrig);
+    }
+
+    let copyClone = menu.querySelector('[data-act="copy-clone-id"]');
+    if (!copyClone) {
+      copyClone = document.createElement("button");
+      copyClone.className = "ctxmenu-item";
+      copyClone.dataset.act = "copy-clone-id";
+      copyClone.role = "menuitem";
+      copyClone.type = "button";
+      copyClone.textContent = "Copy clone channel ID";
+      copyClone.setAttribute("aria-label", "Copy clone ID");
+      copyClone.addEventListener("click", async () => {
+        const row = findChannelRowByOrigId(menuForId);
+        const cid =
+          row && row.cloned_channel_id ? String(row.cloned_channel_id) : "";
+        if (!cid) {
+          window.showToast("No clone channel ID found.", { type: "error" });
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(cid);
+          window.showToast("Copied clone channel ID to clipboard.", {
+            type: "success",
+          });
+        } catch {
+          window.showToast("Could not copy channel ID.", { type: "error" });
+        }
+        hideMenu({ restoreFocus: false });
+      });
+      menu.appendChild(copyClone);
+    }
+
+    let blCat = menu.querySelector('[data-act="bl-category"]');
+    if (!blCat) {
+      blCat = document.createElement("button");
+      blCat.className = "ctxmenu-item";
+      blCat.dataset.act = "bl-category";
+      blCat.role = "menuitem";
+      blCat.type = "button";
+      blCat.textContent = "Add category to blacklist";
+      blCat.setAttribute("aria-label", "Add category to blacklist");
+      blCat.addEventListener("click", () => {
+        const name = menuContext?.name ? String(menuContext.name) : "";
+        const { originalCatId } = resolveCategoryIdsByName(name);
+
+        if (!originalCatId) {
+          window.showToast("Could not resolve category ID.", { type: "error" });
+          hideMenu({ restoreFocus: false });
+          return;
+        }
+
+        hideMenu({ restoreFocus: false });
+        openConfirm(
+          {
+            title: "Add category to blacklist?",
+            body: `This will blacklist <b>${escapeHtml(
+              name
+            )}</b> <span class="muted">(${escapeHtml(
+              String(originalCatId)
+            )})</span>.`,
+            okText: "Add to blacklist",
+          },
+          async () => {
+            try {
+              const res = await fetch("/api/filters/blacklist", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "same-origin",
+                body: JSON.stringify({
+                  scope: "category",
+                  obj_id: String(originalCatId),
+                }),
+              });
+              const j = await res.json().catch(() => ({}));
+              if (!res.ok || j?.ok === false)
+                throw new Error(j?.detail || j?.error || "failed");
+              window.showToast("Category added to blacklist.", {
+                type: "success",
+              });
+            } catch {
+              window.showToast("Failed to add to blacklist.", {
+                type: "error",
+              });
+            }
+          }
+        );
+      });
+      menu.appendChild(blCat);
+    }
+
+    function firstId(row, keys) {
+      for (const k of keys) {
+        const v = row?.[k];
+        if (v != null && String(v).trim() !== "") return String(v).trim();
+      }
+      return null;
+    }
+
+    function heuristicId(rows, testFn) {
+      for (const r of rows) {
+        for (const [k, v] of Object.entries(r || {})) {
+          if (v == null || String(v).trim() === "") continue;
+          const key = k.toLowerCase();
+          if (testFn(key)) return String(v).trim();
+        }
+      }
+      return null;
+    }
+
+    function resolveCategoryIdsByName(name) {
+      const raw = String(name || "").trim();
+      if (!raw)
+        return { originalCatId: null, clonedCatId: null, hasClone: false };
+
+      const resolvedOriginal =
+        (catOrigByEither && catOrigByEither.get(raw.toLowerCase())) || raw;
+
+      const norm = (s) =>
+        String(s || "")
+          .trim()
+          .toLowerCase();
+      const wantA = norm(raw);
+      const wantB = norm(resolvedOriginal);
+
+      const rows = (data || []).filter((r) => {
+        const candidates = [
+          r?.category_name,
+          r?.original_category_name,
+          r?.category_original_name,
+          r?.category_upstream_name,
+          String(r?.category_name || "").trim()
+            ? r?.category_name
+            : UNGROUPED_LABEL,
+        ];
+        return candidates.some((c) => {
+          const n = norm(c);
+          return n && (n === wantA || n === wantB);
+        });
+      });
+
+      const origKeys = [
+        "original_parent_category_id",
+        "original_category_id",
+        "category_original_id",
+        "parent_category_id",
+        "category_id",
+        "category_upstream_id",
+      ];
+      const cloneKeys = [
+        "cloned_parent_category_id",
+        "cloned_category_id",
+        "category_cloned_id",
+        "parent_cloned_category_id",
+      ];
+
+      let originalCatId = null;
+      let clonedCatId = null;
+
+      for (const r of rows) {
+        if (!originalCatId) originalCatId = firstId(r, origKeys);
+        if (!clonedCatId) clonedCatId = firstId(r, cloneKeys);
+        if (originalCatId && clonedCatId) break;
+      }
+
+      if (!clonedCatId) {
+        clonedCatId = heuristicId(
+          rows,
+          (key) =>
+            key.includes("clon") &&
+            key.includes("categor") &&
+            key.endsWith("id")
+        );
+      }
+      if (!originalCatId) {
+        originalCatId = heuristicId(
+          rows,
+          (key) =>
+            !key.includes("clon") &&
+            key.includes("categor") &&
+            key.endsWith("id")
+        );
+      }
+
+      console.debug("cat ids for", name, { originalCatId, clonedCatId, rows });
+
+      return { originalCatId, clonedCatId, hasClone: !!clonedCatId };
+    }
+
+    let copyCatOrig = menu.querySelector('[data-act="copy-cat-orig-id"]');
+    if (!copyCatOrig) {
+      copyCatOrig = document.createElement("button");
+      copyCatOrig.className = "ctxmenu-item";
+      copyCatOrig.dataset.act = "copy-cat-orig-id";
+      copyCatOrig.role = "menuitem";
+      copyCatOrig.type = "button";
+      copyCatOrig.textContent = "Copy original category ID";
+      copyCatOrig.setAttribute("aria-label", "Copy original category ID");
+      copyCatOrig.addEventListener("click", async () => {
+        const name =
+          menuContext && menuContext.name ? String(menuContext.name) : "";
+        const { originalCatId } = resolveCategoryIdsByName(name);
+        if (!originalCatId) {
+          window.showToast("No original category ID found.", { type: "error" });
+          return hideMenu({ restoreFocus: false });
+        }
+        try {
+          await navigator.clipboard.writeText(String(originalCatId));
+          window.showToast("Copied original category ID.", { type: "success" });
+        } catch {
+          window.showToast("Could not copy ID.", { type: "error" });
+        }
+        hideMenu({ restoreFocus: false });
+      });
+      menu.appendChild(copyCatOrig);
+    }
+
+    let copyCatClone = menu.querySelector('[data-act="copy-cat-clone-id"]');
+    if (!copyCatClone) {
+      copyCatClone = document.createElement("button");
+      copyCatClone.className = "ctxmenu-item";
+      copyCatClone.dataset.act = "copy-cat-clone-id";
+      copyCatClone.role = "menuitem";
+      copyCatClone.type = "button";
+      copyCatClone.textContent = "Copy clone category ID";
+      copyCatClone.setAttribute("aria-label", "Copy clone category ID");
+      copyCatClone.addEventListener("click", async () => {
+        const name =
+          menuContext && menuContext.name ? String(menuContext.name) : "";
+        const { clonedCatId } = resolveCategoryIdsByName(name);
+        if (!clonedCatId) {
+          window.showToast("No clone category ID found.", { type: "error" });
+          return hideMenu({ restoreFocus: false });
+        }
+        try {
+          await navigator.clipboard.writeText(String(clonedCatId));
+          window.showToast("Copied clone category ID.", { type: "success" });
+        } catch {
+          window.showToast("Could not copy ID.", { type: "error" });
+        }
+        hideMenu({ restoreFocus: false });
+      });
+      menu.appendChild(copyCatClone);
+    }
+
+    let showCopyOrig = false,
+      showCopyClone = false,
+      showBlCh = false;
+    let showCopyCatOrig = false,
+      showCopyCatClone = false,
+      showBlCat = false;
+
+    if (isChannel && menuForId != null) {
+      const row = findChannelRowByOrigId(menuForId);
+      const isCloned = !!row?.cloned_channel_id;
+      showCopyOrig = isCloned;
+      showCopyClone = isCloned;
+      showBlCh = isCloned;
+    }
+
+    if (isCategory) {
+      if (!isOrphanCat) {
+        const name =
+          menuContext && menuContext.name ? String(menuContext.name) : "";
+        const { originalCatId, clonedCatId } = resolveCategoryIdsByName(name);
+
+        showCopyCatOrig = !!originalCatId;
+        showCopyCatClone = !!clonedCatId;
+
+        showBlCat = !!originalCatId;
+      } else {
+        showCopyCatOrig = false;
+        showCopyCatClone = false;
+        showBlCat = false;
+      }
+    }
+
+    copyOrig.hidden = !showCopyOrig;
+    copyClone.hidden = !showCopyClone;
+    blCh.hidden = !showBlCh;
+
+    copyCatOrig.hidden = !showCopyCatOrig;
+    copyCatClone.hidden = !showCopyCatClone;
+    blCat.hidden = !showBlCat;
+
+    copyCatOrig.setAttribute("aria-hidden", (!showCopyCatOrig).toString());
+    copyCatClone.setAttribute("aria-hidden", (!showCopyCatClone).toString());
+    blCh.setAttribute("aria-hidden", (!showBlCh).toString());
+    blCat.setAttribute("aria-hidden", (!showBlCat).toString());
+
+    const gap = 6,
+      pad = 12,
+      vw = window.innerWidth,
+      vh = window.innerHeight;
     const maxH = Math.max(160, Math.min(360, vh - 2 * pad));
     menu.style.maxHeight = `${maxH}px`;
     menu.style.overflowY = "auto";
+    menu.style.position = "fixed";
 
     const r = btn.getBoundingClientRect();
     const mw = menu.offsetWidth || 180;
-    const mh = menu.offsetHeight;
+    const mh = menu.offsetHeight || 0;
 
     let top = r.bottom + gap;
     let left = Math.min(r.left, vw - mw - pad);
@@ -1004,7 +1682,8 @@
 
   function hideMenu({ restoreFocus = false } = {}) {
     menu.hidden = true;
-    menuForId = null;
+    menuContext = null;
+    menu.classList.remove("customize-skin");
     if (menuAnchorBtn) {
       menuAnchorBtn.setAttribute("aria-expanded", "false");
       if (restoreFocus) menuAnchorBtn.focus();
@@ -1017,12 +1696,48 @@
     if (!btn) return;
     const card = btn.closest(".ch-card");
     const cid = card?.dataset.cid;
-    const isOpenForThis = !menu.hidden && menuForId === cid;
+    const isOpenForThis =
+      !menu.hidden &&
+      menuContext &&
+      menuContext.type === "channel" &&
+      menuContext.id === cid;
     if (isOpenForThis) {
       hideMenu({ restoreFocus: false });
     } else {
-      showMenu(btn, cid);
+      showMenu(btn, { type: "channel", id: cid });
     }
+    e.stopPropagation();
+  });
+
+  root.addEventListener("click", (e) => {
+    const btn = e.target.closest(".cat-menu-trigger");
+    if (!btn) return;
+
+    const chip = btn.closest(".cat-chip");
+    const orphanCatId = chip?.dataset.orphanCatId || null;
+    const catName =
+      chip?.dataset.catName || chip?.textContent?.trim() || "Category";
+
+    const ctx = orphanCatId
+      ? { type: "orphan-cat", id: String(orphanCatId), name: catName }
+      : { type: "category", id: null, name: catName };
+
+    const isOpenForThis =
+      !menu.hidden &&
+      menuContext &&
+      ((ctx.type === "orphan-cat" &&
+        menuContext.type === "orphan-cat" &&
+        menuContext.id === ctx.id) ||
+        (ctx.type === "category" &&
+          menuContext.type === "category" &&
+          menuContext.name === ctx.name));
+
+    if (isOpenForThis) {
+      hideMenu({ restoreFocus: false });
+    } else {
+      showMenu(btn, ctx);
+    }
+
     e.stopPropagation();
   });
 
@@ -1128,53 +1843,113 @@
       return;
     }
 
+    if (act === "customize-category") {
+      e.preventDefault();
+      const ctx = menuContext;
+      if (!ctx || ctx.type !== "category" || !ctx.name) {
+        hideMenu();
+        window.showToast("This item is not a regular category.", {
+          type: "warning",
+        });
+        return;
+      }
+      hideMenu({ restoreFocus: false });
+      openCustomizeCategoryDialog(ctx.name);
+      return;
+    }
+
     if (act === "delete-orphan") {
       e.preventDefault();
-      const item = e.target.closest('[data-act="delete-orphan"]');
-      const kind = item?.dataset.kind || "channel";
-      const id = menuForId;
-      const card = document.querySelector(`.ch-card[data-cid="${id}"]`);
-
-      if (card?.dataset.orphan === "1") {
-        const nameEl = card.querySelector(".ch-name");
-        const niceName =
-          nameEl?.getAttribute("title") ||
-          (nameEl?.textContent || "").replace(/^#\s*/, "") ||
-          "Channel";
-
+      const ctx = menuContext;
+      if (!ctx || ctx.type !== "channel" || !ctx.id) {
         hideMenu();
-
-        openConfirm(
-          {
-            title: "Delete orphan channel?",
-            body: `This will delete <b>${escapeHtml(
-              niceName
-            )}</b> <span class="muted">(${escapeHtml(id)})</span>.`,
-            okText: "Delete",
-          },
-          () => {
-            card.classList.add("is-pending");
-            card.setAttribute("aria-busy", "true");
-            markPending(id);
-            sessionStorage.removeItem(LAST_DELETED_SIG_KEY);
-            sendVerify({ action: "delete_one", kind, id });
-          }
-        );
-      } else {
-        hideMenu();
-        window.showToast("This item is not an orphan.", { type: "warn" });
+        window.showToast("This item is not an orphan channel.", {
+          type: "warn",
+        });
+        return;
       }
+
+      // verify it's actually an orphan channel
+      const selId = String(ctx.id);
+      const card = document.querySelector(
+        `.ch-card[data-cid="${
+          window.CSS && CSS.escape
+            ? CSS.escape(selId)
+            : selId.replace(/"/g, '\\"')
+        }"]`
+      );
+      const isOrphanChannel = card?.dataset?.orphan === "1";
+      const chName =
+        card
+          ?.querySelector(".ch-display-name")
+          ?.textContent?.replace(/^#\s*/, "")
+          .trim() || "Channel";
+
+      if (!isOrphanChannel) {
+        hideMenu();
+        window.showToast("This is not an orphan channel.", { type: "warn" });
+        return;
+      }
+
+      hideMenu();
+
+      openConfirm(
+        {
+          title: "Delete orphan channel?",
+          body: `This will delete <b>${escapeHtml(
+            chName
+          )}</b> <span class="muted">(${escapeHtml(selId)})</span>.`,
+          okText: "Delete",
+        },
+        () => {
+          markPending(selId);
+          sessionStorage.removeItem(LAST_DELETED_SIG_KEY);
+          sendVerify({ action: "delete_one", kind: "channel", id: selId });
+        }
+      );
+      return;
+    }
+
+    if (act === "delete-orphan-cat") {
+      e.preventDefault();
+      const ctx = menuContext;
+      if (!ctx || ctx.type !== "orphan-cat" || !ctx.id) {
+        hideMenu();
+        window.showToast("This item is not an orphan category.", {
+          type: "warn",
+        });
+        return;
+      }
+
+      const catId = ctx.id;
+      const catName = ctx.name || "Category";
+
+      hideMenu();
+
+      openConfirm(
+        {
+          title: "Delete orphan category?",
+          body: `This will delete <b>${escapeHtml(
+            catName
+          )}</b> <span class="muted">(${escapeHtml(catId)})</span>.`,
+          okText: "Delete",
+        },
+        () => {
+          markPending(catId);
+          sessionStorage.removeItem(LAST_DELETED_SIG_KEY);
+
+          sendVerify({ action: "delete_one", kind: "category", id: catId });
+        }
+      );
       return;
     }
   });
 
-  // If a truly cold boot, clear any stale cloning UI
   if (!gate.lastUpIsFresh()) resetAllCloningUI();
 
   // Kick off the gate polling; when ready we'll finish boot.
   gate.checkAndGate(() => afterGateReady());
 
-  // Called once when bot/server is up
   let bootedAfterGate = false;
   async function afterGateReady() {
     if (bootedAfterGate) return;
@@ -1712,7 +2487,6 @@
                 !((orph.categories?.length || 0) + (orph.channels?.length || 0))
               );
 
-              // safety rescan
               sendVerify({ action: "list" });
               if (bulkDeleteInFlight) {
                 bulkDeleteInFlight = false;
@@ -1721,7 +2495,6 @@
               return;
             }
 
-            // Back-compat: ids[] (assume all succeeded)
             if (Array.isArray(p.ids)) {
               let initiatedAny = p.ids.some((id) =>
                 pendingDeletes.has(normId(id))
@@ -1854,17 +2627,15 @@
     return `${y}-${m}-${day}`;
   }
   function startOfDayIsoLocal(dateStr) {
-    // send naive local for server to interpret in UI_TZ
     return `${dateStr}T00:00`;
   }
   function nextDayStartIsoLocal(dateStr) {
-    const d = new Date(`${dateStr}T00:00`); // local
+    const d = new Date(`${dateStr}T00:00`);
     d.setDate(d.getDate() + 1);
     return `${fmtYYYYMMDD(d)}T00:00`;
   }
 
   function parseLocalDate(dateStr) {
-    // Expect "YYYY-MM-DD"; return Date at local midnight or null
     if (!dateStr) return null;
     const [y, m, d] = dateStr.split("-").map((x) => Number.parseInt(x, 10));
     if (!y || !m || !d) return null;
@@ -1880,7 +2651,7 @@
       el = document.createElement("div");
       el.className = "bf-error";
       el.hidden = true;
-      field.appendChild(el); // sits directly under the input
+      field.appendChild(el);
     }
     return el;
   }
@@ -1910,7 +2681,7 @@
       try {
         el.setCustomValidity("");
       } catch {}
-      setFieldError(el, ""); // hide message
+      setFieldError(el, "");
     }
   }
 
@@ -1920,7 +2691,7 @@
 
     const fromRaw = (fromEl?.value || "").trim();
     const toRaw = (toEl?.value || "").trim();
-    if (!fromRaw || !toRaw) return true; // nothing to validate yet
+    if (!fromRaw || !toRaw) return true;
 
     const fd = parseLocalDate(fromRaw);
     const td = parseLocalDate(toRaw);
@@ -1984,7 +2755,6 @@
     dlg.hidden = false;
     dlg.classList.add("show");
 
-    // Close on ESC and click outside (matches other popups)
     const card = dlg.querySelector(".modal-card");
     const onEsc = (e) => {
       if (e.key === "Escape") closeBackfillDialog();
@@ -2006,7 +2776,6 @@
     };
     dlg.addEventListener("mousedown", clearErrorsOnClickInside);
 
-    // Elements
     const form = dlg.querySelector("#bf-form");
     if (form) {
       form.setAttribute("novalidate", "");
@@ -2033,14 +2802,13 @@
         if (!el) return;
         if (el === fromEl || el === toEl) {
           syncMinMax(fromEl, toEl);
-          validateBetween(fromEl, toEl); // will add/remove messages as needed
+          validateBetween(fromEl, toEl);
         } else {
-          setInvalid(el, false); // hides its message
+          setInvalid(el, false);
         }
       })
     );
 
-    // Toggle rows/enablement
     function refresh() {
       const mode =
         dlg.querySelector('input[name="mode"]:checked')?.value || "all";
@@ -2056,7 +2824,6 @@
     radios.forEach((r) => r.addEventListener("change", refresh));
     refresh();
 
-    // Close buttons
     btnClose?.addEventListener("click", closeBackfillDialog, { once: true });
 
     const startBtn = dlg.querySelector("#bf-start");
@@ -2069,7 +2836,7 @@
         box.setAttribute("role", "alert");
         box.setAttribute("aria-live", "assertive");
         const form = dlg.querySelector("#bf-form");
-        (form?.parentNode || dlg).insertBefore(box, form); // show above the form
+        (form?.parentNode || dlg).insertBefore(box, form);
       }
       return box;
     }
@@ -2079,12 +2846,10 @@
       alertBox?.classList.remove("show");
     }
 
-    // Hide tip when user changes inputs or closes dialog
     [startBtn, dlg].forEach((el) =>
       el?.addEventListener("blur", hideMenuMessage, true)
     );
 
-    // Submit
     form?.addEventListener("submit", (ev) => {
       ev.preventDefault();
 
