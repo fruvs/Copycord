@@ -1,4 +1,4 @@
-name: Build & publish Copycord container
+name: Build & publish Copycord container
 
 on:
   push:
@@ -6,12 +6,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read     
-  packages: write   
+  contents: read
+  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -25,19 +33,19 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive lower‑case owner
+      - name: Derive lower-case owner
         id: vars
         run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Build & push server
+      - name: Build & push per-arch image
         uses: docker/build-push-action@v5
         with:
-          context: .                   
+          context: .
           file: ./code/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:${{ github.ref_name }}
-            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:latest
+            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:${{ github.ref_name }}-${{ matrix.arch }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:latest-${{ matrix.arch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
