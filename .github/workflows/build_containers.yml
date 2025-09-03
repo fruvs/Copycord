@@ -12,14 +12,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [amd64, arm64]
-        include:
-          - arch: amd64
-            platform: linux/amd64
-          - arch: arm64
-            platform: linux/arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -37,15 +29,16 @@ jobs:
         id: vars
         run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Build & push per-arch image
+      - name: Build & push multi-arch image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./code/Dockerfile
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:${{ github.ref_name }}-${{ matrix.arch }}
-            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:latest-${{ matrix.arch }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:${{ github.ref_name }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/copycord:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
