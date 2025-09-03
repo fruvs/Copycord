@@ -39,3 +39,5 @@ jobs:
           tags: |
             ghcr.io/${{ steps.vars.outputs.owner }}/copycord:${{ github.ref_name }}
             ghcr.io/${{ steps.vars.outputs.owner }}/copycord:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

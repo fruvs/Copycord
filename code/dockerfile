@@ -1,66 +1,64 @@
-
-FROM node:20-slim AS webbuild
-WORKDIR /frontend
-
-
-COPY code/admin/frontend/package*.json ./
-RUN npm ci
-
-
-COPY code/admin/frontend/ .
-RUN npm run build 
-
-
-FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    VENV_BASE=/opt/venvs \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_DEFAULT_TIMEOUT=60 \
-    LOG_LEVEL=info \
-    ROLE=admin \
-    ADMIN_PORT=8080 \
-    SERVER_PORT=8765 \
-    CLIENT_PORT=8766 \
-    SERVER_CTRL_URL=ws://server:9101 \
-    CLIENT_CTRL_URL=ws://client:9102
-
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential curl \
- && rm -rf /var/lib/apt/lists/*
-
-RUN python -m venv /opt/venvs/admin  && \
-    python -m venv /opt/venvs/server && \
-    python -m venv /opt/venvs/client
-
-COPY code/admin/requirements.txt  /tmp/req-admin.txt
-COPY code/server/requirements.txt /tmp/req-server.txt
-COPY code/client/requirements.txt /tmp/req-client.txt
-
-RUN /opt/venvs/admin/bin/pip  install --upgrade pip -r /tmp/req-admin.txt && \
-    /opt/venvs/server/bin/pip install --upgrade pip -r /tmp/req-server.txt websockets python-dotenv && \
-    /opt/venvs/client/bin/pip install --upgrade pip -r /tmp/req-client.txt websockets python-dotenv
-
-RUN ln -s /opt/venvs/admin/bin/python  /usr/local/bin/python-admin  && \
-    ln -s /opt/venvs/server/bin/python /usr/local/bin/python-server && \
-    ln -s /opt/venvs/client/bin/python /usr/local/bin/python-client && \
-    ln -s /opt/venvs/admin/bin/uvicorn /usr/local/bin/uvicorn-admin || true
-
-WORKDIR /app
-COPY code/admin/   ./admin/
-COPY code/server/  ./server/
-COPY code/client/  ./client/
-COPY code/common/  ./common/
-COPY code/control/ ./control/
-COPY code/entrypoint.sh /entrypoint.sh
-
-
-COPY --from=webbuild /frontend/dist/ /app/admin/static/
-
-RUN sed -i 's/\r$//' /entrypoint.sh \
- && sed -i '1s/^\xEF\xBB\xBF//' /entrypoint.sh \
- && chmod +x /entrypoint.sh
-
-ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
+    FROM node:20-slim AS webbuild
+    WORKDIR /frontend
+    
+    COPY code/admin/frontend/package*.json ./
+    RUN --mount=type=cache,target=/root/.npm npm ci
+    
+    COPY code/admin/frontend/ .
+    RUN --mount=type=cache,target=/root/.npm npm run build
+    
+    FROM python:3.11-slim
+    
+    ENV PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONUNBUFFERED=1 \
+        PYTHONPATH=/app \
+        VENV_BASE=/opt/venvs \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 \
+        PIP_DEFAULT_TIMEOUT=60 \
+        LOG_LEVEL=info \
+        ROLE=admin \
+        ADMIN_PORT=8080 \
+        SERVER_PORT=8765 \
+        CLIENT_PORT=8766 \
+        SERVER_CTRL_URL=ws://server:9101 \
+        CLIENT_CTRL_URL=ws://client:9102
+    
+    RUN --mount=type=cache,target=/var/cache/apt \
+        --mount=type=cache,target=/var/lib/apt \
+        apt-get update && apt-get install -y --no-install-recommends build-essential curl \
+     && rm -rf /var/lib/apt/lists/*
+    
+    RUN python -m venv /opt/venvs/admin  && \
+        python -m venv /opt/venvs/server && \
+        python -m venv /opt/venvs/client
+    
+    COPY code/admin/requirements.txt  /tmp/req-admin.txt
+    COPY code/server/requirements.txt /tmp/req-server.txt
+    COPY code/client/requirements.txt /tmp/req-client.txt
+    
+    RUN --mount=type=cache,target=/root/.cache/pip \
+        /opt/venvs/admin/bin/pip  install --upgrade pip -r /tmp/req-admin.txt && \
+        /opt/venvs/server/bin/pip install --upgrade pip -r /tmp/req-server.txt websockets python-dotenv && \
+        /opt/venvs/client/bin/pip install --upgrade pip -r /tmp/req-client.txt websockets python-dotenv
+    
+    RUN ln -s /opt/venvs/admin/bin/python  /usr/local/bin/python-admin  && \
+        ln -s /opt/venvs/server/bin/python /usr/local/bin/python-server && \
+        ln -s /opt/venvs/client/bin/python /usr/local/bin/python-client && \
+        ln -s /opt/venvs/admin/bin/uvicorn /usr/local/bin/uvicorn-admin || true
+    
+    WORKDIR /app
+    COPY code/admin/   ./admin/
+    COPY code/server/  ./server/
+    COPY code/client/  ./client/
+    COPY code/common/  ./common/
+    COPY code/control/ ./control/
+    COPY code/entrypoint.sh /entrypoint.sh
+    
+    COPY --from=webbuild /frontend/dist/ /app/admin/static/
+    
+    RUN sed -i 's/\r$//' /entrypoint.sh \
+     && sed -i '1s/^\xEF\xBB\xBF//' /entrypoint.sh \
+     && chmod +x /entrypoint.sh
+    
+    ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
+    
