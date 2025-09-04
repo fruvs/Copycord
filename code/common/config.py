@@ -15,7 +15,7 @@ import aiohttp
 from common.db import DBManager
 
 logger = logging.getLogger(__name__)
-CURRENT_VERSION = "v2.1.0"
+CURRENT_VERSION = "v2.1.1"
 
 
 class Config:
