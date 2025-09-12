@@ -1,7 +1,7 @@
 [![Release](https://img.shields.io/github/v/release/copycord/copycord?label=Release)](https://github.com/copycord/copycord/releases/latest) [![Discord](https://img.shields.io/discord/1406152440377638952?color=7289DA&label=Discord&logo=discord)](https://discord.gg/ArFdqrJHBj)
 
 
-_⭐️ Love Copycord? Give us a Star and join the conversation in our Discord community!_
+_⭐️ Love Copycord? Give us a star and join the conversation in our Discord community!_
 
 <p align="left">
   <img src="logo/logo.png" alt="Copycord Logo" width="100"/>
