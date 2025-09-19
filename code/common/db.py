@@ -176,27 +176,62 @@ class DBManager:
             "INSERT OR IGNORE INTO settings (id, blocked_keywords, version, notified_version) VALUES (1, '', '', '')"
         )
 
-        c.execute(
-            """
-        CREATE TABLE IF NOT EXISTS announcement_subscriptions (
-          keyword   TEXT    NOT NULL,
-          user_id   INTEGER NOT NULL,
-          last_updated  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY(keyword, user_id)
-        );
-        """
+        self._ensure_table(
+            name="announcement_subscriptions",
+            create_sql_template="""
+                CREATE TABLE {table} (
+                guild_id     INTEGER NOT NULL,
+                keyword      TEXT    NOT NULL,
+                user_id      INTEGER NOT NULL,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, keyword, user_id)
+                );
+            """,
+            required_columns={"guild_id", "keyword", "user_id", "last_updated"},
+            # For existing installs without guild_id, migrate rows and set guild_id=0
+            copy_map={
+                "guild_id": "0",
+                "keyword": "keyword",
+                "user_id": "user_id",
+                "last_updated": "COALESCE(last_updated, CURRENT_TIMESTAMP)",
+            },
+            post_sql=[
+                "CREATE INDEX IF NOT EXISTS idx_ann_sub_by_user ON announcement_subscriptions(user_id, guild_id);",
+                "CREATE INDEX IF NOT EXISTS idx_ann_sub_by_guild_keyword ON announcement_subscriptions(guild_id, keyword);",
+            ],
         )
 
-        c.execute(
-            """
-        CREATE TABLE IF NOT EXISTS announcement_triggers (
-          keyword        TEXT    NOT NULL,
-          filter_user_id INTEGER NOT NULL,
-          channel_id     INTEGER NOT NULL DEFAULT 0,
-          last_updated  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY(keyword, filter_user_id, channel_id)
-        );
-        """
+        # announcement_triggers (guild-scoped)
+        self._ensure_table(
+            name="announcement_triggers",
+            create_sql_template="""
+                CREATE TABLE {table} (
+                guild_id       INTEGER NOT NULL,
+                keyword        TEXT    NOT NULL,
+                filter_user_id INTEGER NOT NULL,
+                channel_id     INTEGER NOT NULL DEFAULT 0,
+                last_updated   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, keyword, filter_user_id, channel_id)
+                );
+            """,
+            required_columns={
+                "guild_id",
+                "keyword",
+                "filter_user_id",
+                "channel_id",
+                "last_updated",
+            },
+            copy_map={
+                "guild_id": "0",
+                "keyword": "keyword",
+                "filter_user_id": "filter_user_id",
+                "channel_id": "channel_id",
+                "last_updated": "COALESCE(last_updated, CURRENT_TIMESTAMP)",
+            },
+            post_sql=[
+                "CREATE INDEX IF NOT EXISTS idx_ann_trig_by_guild_keyword ON announcement_triggers(guild_id, keyword);",
+                "CREATE INDEX IF NOT EXISTS idx_ann_trig_by_guild_user ON announcement_triggers(guild_id, filter_user_id);",
+            ],
         )
 
         c.execute(
@@ -235,6 +270,116 @@ class DBManager:
         """
         )
         self.conn.commit()
+
+    def _table_exists(self, name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def _table_columns(self, name: str) -> set[str]:
+        return {
+            r[1] for r in self.conn.execute(f"PRAGMA table_info({name})").fetchall()
+        }
+
+    def _ensure_table(
+        self,
+        *,
+        name: str,
+        create_sql_template: str,
+        required_columns: set[str],
+        copy_map: dict[str, str],
+        post_sql: list[str] | None = None,
+    ):
+        """
+        Create or rebuild table `name` to match the target schema.
+
+        - If table missing -> CREATE and run post_sql.
+        - If table exists and has all required columns -> run post_sql and return.
+        - Else rebuild with a transaction or savepoint (depending on whether we're already
+        inside a transaction), temporarily disabling FKs during the swap.
+        """
+        post_sql = post_sql or []
+        exists = self._table_exists(name)
+
+        if not exists:
+            # Fresh create
+            self.conn.execute(create_sql_template.format(table=name))
+            for stmt in post_sql:
+                self.conn.execute(stmt)
+            return
+
+        existing_cols = self._table_columns(name)
+        if required_columns.issubset(existing_cols):
+            # Already matches target; just ensure indexes
+            for stmt in post_sql:
+                self.conn.execute(stmt)
+            return
+
+        # ---- Rebuild path ----
+        temp = f"_{name}_new"
+
+        # Capture current FK setting to restore later
+        prev_fk = self.conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        self.conn.execute("PRAGMA foreign_keys = OFF;")
+
+        # Choose txn primitive: top-level BEGIN or nested SAVEPOINT
+        in_txn = self.conn.in_transaction
+        sp_name = f"sp_rebuild_{name}"
+        try:
+            if in_txn:
+                self.conn.execute(f"SAVEPOINT {sp_name};")
+            else:
+                self.conn.execute("BEGIN;")
+
+            # 1) create new table
+            self.conn.execute(create_sql_template.format(table=temp))
+
+            # 2) copy old -> new with defensive fallbacks for missing legacy columns
+            new_cols = list(copy_map.keys())
+            select_exprs = []
+            for new_col in new_cols:
+                expr = copy_map[new_col].strip()
+                # If expression is a bare identifier that isn't in the old table, fallback.
+                if expr.isidentifier() and expr not in existing_cols:
+                    expr = (
+                        "CURRENT_TIMESTAMP"
+                        if expr.lower() == "last_updated"
+                        else "NULL"
+                    )
+                select_exprs.append(expr)
+
+            self.conn.execute(
+                f"INSERT OR IGNORE INTO {temp} ({', '.join(new_cols)}) "
+                f"SELECT {', '.join(select_exprs)} FROM {name}"
+            )
+
+            # 3) swap tables
+            self.conn.execute(f"DROP TABLE {name};")
+            self.conn.execute(f"ALTER TABLE {temp} RENAME TO {name};")
+
+            # 4) recreate indexes
+            for stmt in post_sql:
+                self.conn.execute(stmt)
+
+            # Commit appropriately
+            if in_txn:
+                self.conn.execute(f"RELEASE SAVEPOINT {sp_name};")
+            else:
+                self.conn.execute("COMMIT;")
+        except Exception:
+            if in_txn:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name};")
+                self.conn.execute(
+                    f"RELEASE SAVEPOINT {sp_name};"
+                )  # end the savepoint scope
+            else:
+                self.conn.execute("ROLLBACK;")
+            raise
+        finally:
+            # Restore FK pragma to its previous value
+            self.conn.execute(f"PRAGMA foreign_keys = {1 if prev_fk else 0};")
 
     def set_config(self, key: str, value: str) -> None:
         with self.lock, self.conn:
@@ -675,83 +820,73 @@ class DBManager:
             "SELECT * FROM emoji_mappings WHERE original_emoji_id = ?", (original_id,)
         ).fetchone()
 
-    def add_announcement_user(self, keyword: str, user_id: int) -> bool:
-        """Returns True if newly added, False if already present."""
+    def add_announcement_user(self, guild_id: int, keyword: str, user_id: int) -> bool:
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO announcement_subscriptions(keyword, user_id) VALUES (?, ?)",
-            (keyword, user_id),
+            "INSERT OR IGNORE INTO announcement_subscriptions(guild_id, keyword, user_id) VALUES (?, ?, ?)",
+            (guild_id, keyword, user_id),
         )
         self.conn.commit()
         return cur.rowcount > 0
 
-    def remove_announcement_user(self, keyword: str, user_id: int) -> bool:
-        """Returns True if removed, False if none existed."""
+    def remove_announcement_user(
+        self, guild_id: int, keyword: str, user_id: int
+    ) -> bool:
         cur = self.conn.execute(
-            "DELETE FROM announcement_subscriptions WHERE keyword = ? AND user_id = ?",
-            (keyword, user_id),
+            "DELETE FROM announcement_subscriptions WHERE guild_id = ? AND keyword = ? AND user_id = ?",
+            (guild_id, keyword, user_id),
         )
         self.conn.commit()
         return cur.rowcount > 0
 
-    def get_announcement_users(self, keyword: str) -> list[int]:
+    def get_announcement_users(self, guild_id: int, keyword: str) -> list[int]:
         """
-        Returns all user IDs who subscribed to this keyword
-        OR who subscribed globally (keyword='*').
+        Users subscribed to this keyword in this guild, plus:
+        - '*' in this guild (all keywords), and
+        - if you support cross-guild global subs: guild_id=0 records.
         """
         rows = self.conn.execute(
             "SELECT user_id FROM announcement_subscriptions "
-            "WHERE keyword = ? OR keyword = '*'",
-            (keyword,),
+            "WHERE (guild_id = ? AND (keyword = ? OR keyword = '*')) "
+            "   OR (guild_id = 0 AND (keyword = ? OR keyword = '*'))",
+            (guild_id, keyword, keyword),
         ).fetchall()
         return [r["user_id"] for r in rows]
 
-    def get_announcement_keywords(self) -> list[str]:
-        """Distinct list of all keywords with at least one subscriber."""
+    def add_announcement_trigger(
+        self, guild_id: int, keyword: str, filter_user_id: int = 0, channel_id: int = 0
+    ) -> bool:
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO announcement_triggers(guild_id, keyword, filter_user_id, channel_id) "
+            "VALUES (?, ?, ?, ?)",
+            (guild_id, keyword, filter_user_id, channel_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_announcement_keywords(self, guild_id: int) -> list[str]:
         rows = self.conn.execute(
-            "SELECT DISTINCT keyword FROM announcement_subscriptions"
+            "SELECT DISTINCT keyword FROM announcement_subscriptions WHERE guild_id IN (?, 0)",
+            (guild_id,),
         ).fetchall()
         return [r["keyword"] for r in rows]
 
-    def add_announcement_trigger(
-        self,
-        keyword: str,
-        filter_user_id: int = 0,
-        channel_id: int = 0,
-    ) -> bool:
-        """
-        Adds a new announcement trigger to the database.
-        """
-        cur = self.conn.execute(
-            "INSERT OR IGNORE INTO announcement_triggers(keyword, filter_user_id, channel_id) "
-            "VALUES (?, ?, ?)",
-            (keyword, filter_user_id, channel_id),
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
-
     def remove_announcement_trigger(
-        self,
-        keyword: str,
-        filter_user_id: int = 0,
-        channel_id: int = 0,
+        self, guild_id: int, keyword: str, filter_user_id: int = 0, channel_id: int = 0
     ) -> bool:
-        """
-        Removes an announcement trigger from the database.
-        """
         cur = self.conn.execute(
             "DELETE FROM announcement_triggers "
-            "WHERE keyword = ? AND filter_user_id = ? AND channel_id = ?",
-            (keyword, filter_user_id, channel_id),
+            "WHERE guild_id = ? AND keyword = ? AND filter_user_id = ? AND channel_id = ?",
+            (guild_id, keyword, filter_user_id, channel_id),
         )
         self.conn.commit()
         return cur.rowcount > 0
 
-    def get_announcement_triggers(self) -> dict[str, list[tuple[int, int]]]:
-        """
-        Retrieves announcement triggers from the database.
-        """
+    def get_announcement_triggers(
+        self, guild_id: int
+    ) -> dict[str, list[tuple[int, int]]]:
         rows = self.conn.execute(
-            "SELECT keyword, filter_user_id, channel_id FROM announcement_triggers"
+            "SELECT keyword, filter_user_id, channel_id FROM announcement_triggers WHERE guild_id = ?",
+            (guild_id,),
         ).fetchall()
         d: dict[str, list[tuple[int, int]]] = {}
         for r in rows:
@@ -759,6 +894,52 @@ class DBManager:
                 (r["filter_user_id"], r["channel_id"])
             )
         return d
+
+    def get_all_announcement_triggers_flat(self) -> list[sqlite3.Row]:
+        """
+        Returns every row in announcement_triggers with no grouping.
+        Columns: guild_id, keyword, filter_user_id, channel_id, last_updated
+        """
+        return self.conn.execute(
+            """
+            SELECT guild_id, keyword, filter_user_id, channel_id, last_updated
+            FROM announcement_triggers
+            ORDER BY guild_id ASC, LOWER(keyword) ASC, filter_user_id ASC, channel_id ASC
+            """
+        ).fetchall()
+        
+    def get_all_announcement_subscriptions_flat(self) -> list[sqlite3.Row]:
+        """
+        Returns every row in announcement_subscriptions with no grouping.
+        Columns: guild_id, keyword, user_id, last_updated
+        """
+        return self.conn.execute(
+            """
+            SELECT guild_id, keyword, user_id, last_updated
+            FROM announcement_subscriptions
+            ORDER BY guild_id ASC, LOWER(keyword) ASC, user_id ASC
+            """
+        ).fetchall()
+
+    def get_effective_announcement_triggers(self, guild_id: int) -> dict[str, list[tuple[int, int]]]:
+        """
+        Triggers that apply to this guild: rows where guild_id IN (guild_id, 0).
+        Returns {keyword: [(filter_user_id, channel_id), ...]} with duplicates removed.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT keyword, filter_user_id, channel_id
+            FROM announcement_triggers
+            WHERE guild_id IN (?, 0)
+            """,
+            (guild_id,),
+        ).fetchall()
+
+        out: dict[str, set[tuple[int, int]]] = {}
+        for r in rows:
+            out.setdefault(r["keyword"], set()).add((int(r["filter_user_id"]), int(r["channel_id"])))
+        return {k: list(v) for k, v in out.items()}
+
 
     def add_onjoin_subscription(self, guild_id: int, user_id: int) -> bool:
         cur = self.conn.execute(
@@ -898,7 +1079,7 @@ class DBManager:
         ins("exclude", "category", exclude_categories)
         ins("exclude", "channel", exclude_channels)
         self.conn.commit()
-        
+
     def add_filter(self, kind: str, scope: str, obj_id: int) -> None:
         """
         Insert a single filter row (no-op if it already exists).
