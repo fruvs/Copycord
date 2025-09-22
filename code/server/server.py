@@ -11,6 +11,7 @@ import contextlib
 import signal
 import asyncio
 import logging
+import random
 from typing import List, Optional, Tuple, Dict, Union, Coroutine, Any
 import aiohttp
 import discord
@@ -131,6 +132,9 @@ class ServerReceiver:
         self._wh_meta_ttl = 300
         self._default_avatar_sha1: str | None = None
         self._shutting_down = False
+        self._inflight_events: dict[int, asyncio.Event] = {}
+        self._latest_edit_payload: dict[int, dict] = {}
+        self._pending_deletes: set[int] = set()
         orig_on_connect = self.bot.on_connect
         self.bus = AdminBus(
             role="server", logger=logger, admin_ws_url=self.config.ADMIN_WS_URL
@@ -223,7 +227,7 @@ class ServerReceiver:
 
         asyncio.create_task(self.config.setup_release_watcher(self))
         self.session = aiohttp.ClientSession()
-        self.webhook_exporter = WebhookDMExporter(self.session, logger) # DM Exporter
+        self.webhook_exporter = WebhookDMExporter(self.session, logger)  # DM Exporter
         # Ensure we're in the clone guild
         clone_guild = self.bot.get_guild(self.clone_guild_id)
         if clone_guild is None:
@@ -475,6 +479,18 @@ class ServerReceiver:
 
                 self._track(self.forward_message(data), name="live-forward")
 
+        elif typ == "message_edit":
+            self._track(self.handle_message_edit(data), name="edit-msg")
+
+        elif typ == "thread_message_edit":
+            self._track(self.handle_message_edit(data), name="edit-thread-msg")
+
+        elif typ == "message_delete":
+            self._track(self.handle_message_delete(data), name="del-msg")
+
+        elif typ == "thread_message_delete":
+            self._track(self.handle_message_delete(data), name="del-thread-msg")
+
         elif typ == "thread_message":
             self._track(self.handle_thread_message(data), name="thread-msg")
 
@@ -587,23 +603,28 @@ class ServerReceiver:
 
         elif typ == "member_joined":
             asyncio.create_task(self.onjoin.handle_member_joined(data))
-            
+
         elif typ == "export_dm_message":
-            if getattr(self, "shutting_down", False) or self.webhook_exporter.is_stopped:
+            if (
+                getattr(self, "shutting_down", False)
+                or self.webhook_exporter.is_stopped
+            ):
                 return
             await self.webhook_exporter.handle_ws_export_dm_message(data)
 
         elif typ == "export_dm_done":
             await self.webhook_exporter.handle_ws_export_dm_done(data)
-            
+
         elif typ == "export_message":
-            if getattr(self, "shutting_down", False) or self.webhook_exporter.is_stopped:
+            if (
+                getattr(self, "shutting_down", False)
+                or self.webhook_exporter.is_stopped
+            ):
                 return
             await self.webhook_exporter.handle_ws_export_message(data)
 
         elif typ == "export_messages_done":
             await self.webhook_exporter.handle_ws_export_messages_done(data)
-            
 
     async def process_sitemap_queue(self):
         """Continuously process only the newest sitemap, discarding any others."""
@@ -728,8 +749,10 @@ class ServerReceiver:
 
             all_sub_keys = self.db.get_announcement_keywords(guild_id)
             matching_keys = [
-                sub_kw for sub_kw in all_sub_keys
-                if sub_kw == "*" or re.search(rf"\b{re.escape(sub_kw)}\b", content, re.IGNORECASE)
+                sub_kw
+                for sub_kw in all_sub_keys
+                if sub_kw == "*"
+                or re.search(rf"\b{re.escape(sub_kw)}\b", content, re.IGNORECASE)
             ]
 
             user_ids = set()
@@ -762,9 +785,13 @@ class ServerReceiver:
                 try:
                     user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
                     await user.send(embed=embed)
-                    logger.info(f"[🔔] DM’d {user} for keys={matching_keys} in g={guild_id}")
+                    logger.info(
+                        f"[🔔] DM’d {user} for keys={matching_keys} in g={guild_id}"
+                    )
                 except Exception as e:
-                    logger.warning(f"[⚠️] Failed DM uid={uid} keys={matching_keys} g={guild_id}: {e}")
+                    logger.warning(
+                        f"[⚠️] Failed DM uid={uid} keys={matching_keys} g={guild_id}: {e}"
+                    )
 
         except Exception as e:
             logger.exception("Unexpected error in handle_announce: %s", e)
@@ -2567,6 +2594,14 @@ class ServerReceiver:
         tag = self._log_tag(msg)
         source_id = msg["channel_id"]
         is_backfill = bool(msg.get("__backfill__"))
+        
+        # mark send in-flight for this message
+        try:
+            _orig_mid_for_inflight = int((msg.get("message_id") or 0))
+        except Exception:
+            _orig_mid_for_inflight = 0
+        if _orig_mid_for_inflight and _orig_mid_for_inflight not in self._inflight_events:
+            self._inflight_events[_orig_mid_for_inflight] = asyncio.Event()
 
         mapping = self.chan_map.get(source_id)
         if mapping is None:
@@ -2739,9 +2774,8 @@ class ServerReceiver:
                     orig_cid = int(msg.get("channel_id") or 0)
                     orig_mid = int(msg.get("message_id") or 0)
 
-
                     cloned_cid = int(mapping["cloned_channel_id"])
-                    
+
                     cloned_mid = int(getattr(sent_msg, "id", 0)) if sent_msg else None
 
                     used_url = getattr(webhook, "url", None)
@@ -2754,9 +2788,51 @@ class ServerReceiver:
                         cloned_message_id=cloned_mid,
                         webhook_url=used_url,
                     )
+                    
+                    ev = self._inflight_events.get(orig_mid)
+                    if ev:
+                        ev.set()
+
+                    try:
+                        row = self.db.get_mapping_by_original(orig_mid)
+                    except Exception:
+                        row = None
+
+                    if orig_mid in self._pending_deletes:
+                        try:
+                            if row:
+                                ok = await self._delete_with_row(row, orig_mid, msg.get("channel_name"))
+                                if ok:
+                                    logger.debug(
+                                        "[🧹] Applied queued delete right after initial send for orig %s",
+                                        orig_mid,
+                                    )
+                            else:
+                                logger.debug(
+                                    "[🕒] Pending delete found but mapping re-read failed for orig %s",
+                                    orig_mid,
+                                )
+                        finally:
+                            self._pending_deletes.discard(orig_mid)
+                            self._latest_edit_payload.pop(orig_mid, None)
+                            self._inflight_events.pop(orig_mid, None)
+                    else:
+                        latest = self._latest_edit_payload.pop(orig_mid, None)
+                        if latest and row:
+                            try:
+                                await self._edit_with_row(row, latest, orig_mid)
+                                logger.debug(
+                                    "[edit-coalesce] applied latest edit after initial send for orig %s",
+                                    orig_mid,
+                                )
+                            except Exception:
+                                logger.debug("[edit-coalesce] immediate apply failed", exc_info=True)
+
+                        self._inflight_events.pop(orig_mid, None)
+                        
                 except Exception:
                     logger.exception("upsert_message_mapping failed (normal channel)")
-    
+
                 if is_backfill:
                     self.backfill.note_sent(source_id)
                     delivered, total = self.backfill.get_progress(source_id)
@@ -3016,12 +3092,161 @@ class ServerReceiver:
             override_identity=None,
         )
 
+    def _coerce_embeds(self, lst):
+        result = []
+        for e in lst or []:
+            if isinstance(e, discord.Embed):
+                result.append(e)
+            elif isinstance(e, dict):
+                emb = discord.Embed(
+                    title=e.get("title"),
+                    description=e.get("description"),
+                )
+                img = e.get("image") or {}
+                if isinstance(img, dict) and img.get("url"):
+                    emb.set_image(url=img["url"])
+                thumb = e.get("thumbnail") or {}
+                if isinstance(thumb, dict) and thumb.get("url"):
+                    emb.set_thumbnail(url=thumb["url"])
+                result.append(emb)
+        return result
+
+    async def _get_mapping_with_retry(
+        self,
+        orig_mid: int,
+        *,
+        attempts: int = 5,
+        base_delay: float = 0.08,
+        max_delay: float = 0.8,
+        jitter: float = 0.25,
+        log_prefix: str = "mapping",
+    ):
+        """Short, bounded retry to tolerate late DB writes."""
+        row = None
+        for i in range(1, attempts + 1):
+            try:
+                row = self.db.get_mapping_by_original(orig_mid)
+            except Exception:
+                row = None
+            if row is not None:
+                if i > 1:
+                    logger.debug("[⏱️] %s found on attempt %d for orig %s", log_prefix, i, orig_mid)
+                return row
+            delay = min(max_delay, base_delay * (2 ** (i - 1)))
+            delay += random.uniform(-jitter * delay, jitter * delay)
+            await asyncio.sleep(max(0.0, delay))
+        logger.debug("[⌛] %s not found after %d attempts for orig %s", log_prefix, attempts, orig_mid)
+        return None
+
+    async def _edit_with_row(self, row, data: dict, orig_mid: int) -> bool:
+        try:
+            cloned_mid = int(row["cloned_message_id"])
+            webhook_url = row["webhook_url"]
+        except Exception:
+            cloned_mid = None
+            webhook_url = None
+
+        if not (cloned_mid and webhook_url):
+            return False
+
+        try:
+            if self.session is None or self.session.closed:
+                self.session = aiohttp.ClientSession()
+            wh = Webhook.from_url(webhook_url, session=self.session)
+            await wh.edit_message(
+                cloned_mid,
+                content=(data.get("content") or None),
+                embeds=self._coerce_embeds(data.get("embeds")),
+                allowed_mentions=None,
+            )
+            logger.info("[✏️] Edited cloned msg %s (orig %s) in #%s",
+                        cloned_mid, orig_mid, data.get("channel_name"))
+            return True
+        except Exception as e:
+            logger.warning("[⚠️] Edit failed for orig %s (will resend): %s", orig_mid, e)
+            return False
+
+    async def _fallback_resend_edit(self, data: dict, orig_mid: int):
+        try:
+            await self.forward_message(data)
+            logger.info("[♻️] Resent edited message as new (orig %s)", orig_mid)
+        except Exception:
+            logger.exception("[❌] Fallback resend failed for edited message (orig %s)", orig_mid)
+
+    async def handle_message_edit(self, data: dict):
+        """
+        Try to edit the cloned webhook message that corresponds to the original one.
+        If the original send is still in-flight (rate limited / queued), wait briefly
+        for its mapping to appear; coalesce multiple edits during the wait.
+        """
+        try:
+            orig_mid = int(data.get("message_id") or 0)
+            _ = int(data.get("channel_id") or 0)  # for parity/logging
+        except Exception:
+            return
+        if not orig_mid:
+            return
+
+        row = None
+        try:
+            row = self.db.get_mapping_by_original(orig_mid)
+        except Exception:
+            row = None
+
+        if row is not None:
+            await self._edit_with_row(row, data, orig_mid)
+            return
+
+        # No mapping yet — is the original send in-flight?
+        ev = self._inflight_events.get(orig_mid)
+        if ev and not ev.is_set():
+            # Coalesce: keep only the latest edit payload for this message
+            self._latest_edit_payload[orig_mid] = data
+
+            # Wait a short window for mapping to be written after send completes
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # Mapping never appeared — safe fallback
+                await self._fallback_resend_edit(data, orig_mid)
+                return
+
+            # After signal, re-read mapping and apply the most recent coalesced state
+            try:
+                row = self.db.get_mapping_by_original(orig_mid)
+            except Exception:
+                row = None
+
+            payload = self._latest_edit_payload.pop(orig_mid, data)
+            if row is not None:
+                await self._edit_with_row(row, payload, orig_mid)
+                self._inflight_events.pop(orig_mid, None)
+                return
+
+            # Still no mapping — fallback
+            await self._fallback_resend_edit(payload, orig_mid)
+            return
+
+        # Not marked in-flight (or we missed it): short retry burst for late DB write
+        row = await self._get_mapping_with_retry(
+            orig_mid, attempts=5, base_delay=0.08, max_delay=0.8, jitter=0.25, log_prefix="edit-wait"
+        )
+        if row is not None:
+            await self._edit_with_row(row, data, orig_mid)
+            return
+
+        # Final fallback — resend as a new message
+        await self._fallback_resend_edit(data, orig_mid)
+
     async def forward_to_webhook(self, msg_data: dict, webhook_url: str):
-        async with self.session.post(webhook_url, json={
-            "username": msg_data["author"]["name"],
-            "avatar_url": msg_data["author"].get("avatar_url"),
-            "content": msg_data["content"],
-        }) as resp:
+        async with self.session.post(
+            webhook_url,
+            json={
+                "username": msg_data["author"]["name"],
+                "avatar_url": msg_data["author"].get("avatar_url"),
+                "content": msg_data["content"],
+            },
+        ) as resp:
             if resp.status != 200 and resp.status != 204:
                 logger.warning(f"Webhook send failed: {resp.status}")
 
@@ -3680,8 +3905,10 @@ class ServerReceiver:
         forced = dict(data)
         forced["__force_webhook_url__"] = url
         await self.forward_message(forced)
-        
-    def _prune_old_messages_loop(self, retention_seconds: int | None = None) -> asyncio.Task:
+
+    def _prune_old_messages_loop(
+        self, retention_seconds: int | None = None
+    ) -> asyncio.Task:
         """
         Start hourly task that deletes old rows from the `messages` table.
         """
@@ -3712,7 +3939,8 @@ class ServerReceiver:
         async def _runner():
             logger.debug(
                 "[prune] starting hourly pruner (retention=%d seconds ~= %.2f days)",
-                retention_seconds, retention_seconds / 86400.0
+                retention_seconds,
+                retention_seconds / 86400.0,
             )
             try:
                 while True:
@@ -3721,7 +3949,7 @@ class ServerReceiver:
                         if deleted:
                             logger.info(
                                 "[prune] deleted %d old message mappings from db.",
-                                deleted
+                                deleted,
                             )
 
                     except Exception:
@@ -3735,6 +3963,117 @@ class ServerReceiver:
         # Spawn the task
         self._prune_task = asyncio.create_task(_runner(), name="prune-old-messages")
         return self._prune_task
+
+    async def _delete_with_row(self, row, orig_mid: int, channel_name: str | None = None) -> bool:
+        try:
+            cloned_mid = int(row["cloned_message_id"])
+            webhook_url = row["webhook_url"]
+        except Exception:
+            logger.debug("[🗑️] Mapping incomplete for orig %s; nothing to delete", orig_mid)
+            return False
+
+        if not (cloned_mid and webhook_url):
+            logger.debug("[🗑️] Missing cloned_mid/webhook for orig %s; nothing to delete", orig_mid)
+            return False
+
+        try:
+            if self.session is None or self.session.closed:
+                self.session = aiohttp.ClientSession()
+            wh = Webhook.from_url(webhook_url, session=self.session)
+            await wh.delete_message(cloned_mid)
+            logger.info(
+                "[🗑️] Deleted cloned msg %s (orig %s) in #%s",
+                cloned_mid,
+                orig_mid,
+                channel_name,
+            )
+        except NotFound:
+            # Treat "Unknown Message" as already-gone success to avoid noise
+            logger.info(
+                "[🗑️] Cloned msg already gone (orig %s) in #%s; treating as deleted",
+                orig_mid,
+                channel_name,
+            )
+        except Exception as e:
+            logger.warning("[⚠️] Failed to delete cloned msg for orig %s: %s", orig_mid, e)
+            return False
+
+        # Try to remove the mapping
+        try:
+            self.db.delete_message_mapping(orig_mid)
+        except Exception:
+            logger.debug("Could not delete mapping row for orig %s", orig_mid, exc_info=True)
+        return True
+ 
+ 
+    async def handle_message_delete(self, data: dict):
+        """
+        Delete the cloned webhook message that corresponds to the original one.
+        If the original send is still in-flight (rate limited / queued), queue the delete,
+        wait briefly for the mapping, and apply it once ready.
+        """
+        try:
+            orig_mid = int(data.get("message_id") or 0)
+        except Exception:
+            return
+        if not orig_mid:
+            return
+
+        channel_name = data.get("channel_name")
+
+        # Fast path: mapping exists now
+        row = None
+        try:
+            row = self.db.get_mapping_by_original(orig_mid)
+        except Exception:
+            row = None
+
+        if row is not None:
+            await self._delete_with_row(row, orig_mid, channel_name)
+            return
+
+        # No mapping — is initial send in-flight?
+        ev = self._inflight_events.get(orig_mid)
+        if ev and not ev.is_set():
+            # Mark this message for deletion once mapping appears
+            self._pending_deletes.add(orig_mid)
+
+            # Wait a short window for the mapping to be written
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=7.0)
+            except asyncio.TimeoutError:
+                # Still not ready — keep it queued; forward_message will clean it up if/when it lands
+                logger.debug("[🕒] Delete queued; mapping not ready yet for orig %s", orig_mid)
+                return
+
+            # After signal, attempt delete again
+            try:
+                row = self.db.get_mapping_by_original(orig_mid)
+            except Exception:
+                row = None
+
+            if row is not None:
+                await self._delete_with_row(row, orig_mid, channel_name)
+                self._pending_deletes.discard(orig_mid)
+                # sender usually pops the event; be defensive:
+                self._inflight_events.pop(orig_mid, None)
+                return
+
+            # Mapping still missing (rare). Keep queued for the sender to honor.
+            logger.debug("[🕒] Delete remains queued; mapping still missing for orig %s", orig_mid)
+            return
+
+        # Not marked in-flight (or we missed it): brief DB retry, otherwise queue
+        row = await self._get_mapping_with_retry(
+            orig_mid, attempts=5, base_delay=0.08, max_delay=0.8, jitter=0.25, log_prefix="delete-wait"
+        )
+        if row is not None:
+            await self._delete_with_row(row, orig_mid, channel_name)
+            return
+
+        # Still no mapping — queue it so that forward_message can honor it if/when the send succeeds
+        self._pending_deletes.add(orig_mid)
+        logger.debug("[🕒] Delete queued with no mapping/in-flight info for orig %s", orig_mid)
 
     async def _shutdown(self):
         """
