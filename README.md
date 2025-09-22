@@ -22,8 +22,9 @@ Easily clone servers, scrape member lists, customize channels, and much more jus
 > - **Smart Message Filtering** – Automatically block or drop unwanted messages based on custom keyword rules.  
 > - **Member List Scraper** – Use the member scraper to grab User IDs, Usernames, Avatars, and Bios from any server.
 > - **Deep History Import** – Clone an entire channel’s message history, not just the new ones.
-> - **DM History Export** – Export all DM messages from any user's inbox via Webhook.
-> - **Real-Time DM Alerts** – Get instant, customizable DM notifications for important messages and events that matter most to you.  
+> - **DM History Export** – Export all DM messages from any user's inbox into a JSON file with optional Webhook forwarding.
+> - **Universal Message Export** – Export all messages from any guild into a JSON file with optional Webhook forwarding.
+> - **Real-Time DM Alerts** – Get instant DM notifications for key messages across any guild — and subscribe your members to get notifications too.
 > - **Your Own Bot, Your Rules** – Run a fully independent Discord bot that you control—no restrictions.  
 > - **Sleek Web Dashboard** – Manage everything through a modern, easy-to-use web interface. 
 
