@@ -1,6 +1,6 @@
 # =============================================================================
 #  Copycord
-#  Copyright (C) 2021 github.com/Copycord
+#  Copyright (C) 2025 github.com/Copycord
 #
 #  This source code is released under the GNU Affero General Public License
 #  version 3.0. A copy of the license is available at:
@@ -594,6 +594,15 @@ class ServerReceiver:
 
         elif typ == "export_dm_done":
             await self.webhook_exporter.handle_ws_export_dm_done(data)
+            
+        elif typ == "export_message":
+            if getattr(self, "shutting_down", False) or self.webhook_exporter.is_stopped:
+                return
+            await self.webhook_exporter.handle_ws_export_message(data)
+
+        elif typ == "export_messages_done":
+            await self.webhook_exporter.handle_ws_export_messages_done(data)
+            
 
     async def process_sitemap_queue(self):
         """Continuously process only the newest sitemap, discarding any others."""

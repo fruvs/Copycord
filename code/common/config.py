@@ -1,6 +1,6 @@
 # =============================================================================
 #  Copycord
-#  Copyright (C) 2021 github.com/Copycord
+#  Copyright (C) 2025 github.com/Copycord
 #
 #  This source code is released under the GNU Affero General Public License
 #  version 3.0. A copy of the license is available at:
@@ -14,7 +14,7 @@ from typing import Optional
 from common.db import DBManager
 
 logger = logging.getLogger(__name__)
-CURRENT_VERSION = "v2.2.0"
+CURRENT_VERSION = "v2.3.0"
 
 
 class Config:
