@@ -9,7 +9,6 @@
 
 import asyncio
 import contextlib
-import json
 import re
 import signal
 import unicodedata
@@ -20,7 +19,6 @@ import discord
 from discord import ChannelType, MessageType
 from discord.errors import Forbidden, HTTPException
 import os
-import sys
 from discord.ext import commands
 from common.config import Config, CURRENT_VERSION
 from common.db import DBManager
@@ -29,7 +27,7 @@ from client.message_utils import MessageUtils
 from common.websockets import WebsocketManager, AdminBus
 from client.scraper import MemberScraper
 from client.helpers import ClientUiController
-from client.export_runners import ExportMessagesRunner, DmHistoryExporter
+from client.export_runners import BackfillEngine, ExportMessagesRunner, DmHistoryExporter
 
 
 LOG_DIR = "/data"
@@ -139,6 +137,7 @@ class ClientListener:
         self.runner = ExportMessagesRunner(
             bot=self.bot, ws=self.ws, msg_serializer=self.msg.serialize, logger=logger
         )
+        self.backfill = BackfillEngine(self, logger=logger)
 
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -215,16 +214,14 @@ class ClientListener:
                 or data.get("until")
             )
 
-            _n = data.get("last_n") or (
-                rng.get("value") if mode in ("last", "last_n") else None
-            )
+            _n = data.get("last_n") or (rng.get("value") if mode in ("last", "last_n") else None)
             try:
                 last_n = int(_n) if _n is not None else None
             except Exception:
                 last_n = None
 
             asyncio.create_task(
-                self._backfill_channel(
+                self.backfill.run_channel(
                     chan_id,
                     after_iso=after_iso,
                     before_iso=before_iso,
@@ -780,9 +777,8 @@ class ClientListener:
         lower = content.lower()
         author = message.author
         chan_id = message.channel.id
-        guild_id = message.guild.id if message.guild else 0  # 0 = DMs / no guild
+        guild_id = message.guild.id if message.guild else 0
 
-        # Load triggers that apply here: this guild + global (guild_id=0)
         triggers = self.db.get_effective_announcement_triggers(guild_id)
         if not triggers:
             return False
@@ -791,11 +787,9 @@ class ClientListener:
             key = kw.lower()
             matched = False
 
-            # 1) bare word (letters/digits/_)
             if re.match(r"^\w+$", key) and re.search(rf"\b{re.escape(key)}\b", lower):
                 matched = True
 
-            # 2) custom/standard emoji like <:key:123> or <a:key:123>
             if (
                 not matched
                 and re.match(r"^[A-Za-z0-9_]+$", key)
@@ -803,15 +797,12 @@ class ClientListener:
             ):
                 matched = True
 
-            # 3) simple substring fallback
             if not matched and key in lower:
                 matched = True
 
             if not matched:
                 continue
 
-            # Filter by author/channel. Note: channel_id filters with guild_id=0 still work
-            # because Discord channel IDs are globally unique.
             for filter_id, allowed_chan in entries:
                 if (filter_id == 0 or author.id == filter_id) and (
                     allowed_chan == 0 or chan_id == allowed_chan
@@ -819,7 +810,7 @@ class ClientListener:
                     payload = {
                         "type": "announce",
                         "data": {
-                            "guild_id": guild_id,  # the guild where it fired
+                            "guild_id": guild_id,
                             "keyword": kw,
                             "content": content,
                             "author": author.name,
@@ -1027,7 +1018,7 @@ class ClientListener:
                 ),
                 "content": content,
                 "timestamp": str(after.edited_at or after.created_at),
-                "attachments": attachments,  # kept for completeness
+                "attachments": attachments,
                 "components": components,
                 "stickers": stickers_payload,
                 "embeds": embeds,
@@ -1102,7 +1093,7 @@ class ClientListener:
                     if getattr(channel, "type", None)
                     else None
                 ),
-                "author": author,  # may be None for raw
+                "author": author,
                 "author_id": (
                     getattr(getattr(msg, "author", None), "id", None) if msg else None
                 ),
@@ -1195,7 +1186,6 @@ class ClientListener:
         if not guild or not self._is_host_guild(guild):
             return
 
-        # Uncached message: send minimal info
         is_thread = getattr(channel, "type", None) in (
             ChannelType.public_thread,
             ChannelType.private_thread,
@@ -1444,420 +1434,6 @@ class ClientListener:
         except Exception:
             logger.exception("Failed to forward member_joined")
 
-    async def _backfill_channel(
-        self,
-        original_channel_id: int,
-        *,
-        after_iso: str | None = None,
-        before_iso: str | None = None,
-        last_n: int | None = None,
-    ):
-        import asyncio
-        import os
-        from datetime import datetime, timezone
-
-        def _coerce_int(x):
-            try:
-                return int(x)
-            except Exception:
-                return None
-
-        try:
-            from zoneinfo import ZoneInfo
-
-            _DEFAULT_UI_TZ = os.getenv("UI_TZ", "America/New_York")
-            LOCAL_TZ = ZoneInfo(_DEFAULT_UI_TZ)
-        except Exception:
-            LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
-
-        def _parse_iso(s: str | None) -> datetime | None:
-            if not s:
-                return None
-            try:
-                dt = datetime.fromisoformat(s)
-            except Exception:
-                try:
-                    dt = datetime.fromisoformat(s + ":00")
-                except Exception:
-                    return None
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
-            return dt
-
-        after_dt = _parse_iso(after_iso)
-        before_dt = _parse_iso(before_iso)
-
-        mode = (
-            "last_n"
-            if _coerce_int(last_n)
-            else (
-                "between"
-                if (after_iso and before_iso)
-                else ("since" if after_iso else "all")
-            )
-        )
-
-        logger.debug(
-            "[backfill] INIT | channel=%s mode=%s after_iso=%r before_iso=%r last_n=%r",
-            original_channel_id,
-            mode,
-            after_iso,
-            before_iso,
-            last_n,
-        )
-
-        loop = asyncio.get_event_loop()
-        t0 = loop.time()
-        sent = 0
-        skipped = 0
-        last_ping = 0.0
-        last_log = 0.0
-        PROGRESS_EVERY = 50
-        LOG_EVERY_SEC = 5.0
-
-        await self.ws.send(
-            {
-                "type": "backfill_started",
-                "data": {
-                    "channel_id": original_channel_id,
-                    "range": {
-                        "after": after_iso,
-                        "before": before_iso,
-                        "last_n": last_n,
-                    },
-                },
-            }
-        )
-
-        guild = None
-        if self.host_guild_id:
-            guild = self.bot.get_guild(self.host_guild_id)
-
-        if not guild:
-            ch_probe = None
-            try:
-                ch_probe = self.bot.get_channel(
-                    original_channel_id
-                ) or await self.bot.fetch_channel(original_channel_id)
-            except Exception:
-                ch_probe = None
-            if ch_probe and getattr(ch_probe, "guild", None):
-                guild = ch_probe.guild
-
-        if not guild and self.bot.guilds:
-            guild = self.bot.guilds[0]
-
-        if not guild:
-            logger.error(
-                "[backfill] ⛔ no accessible guild found for channel=%s",
-                original_channel_id,
-            )
-            try:
-                await self.ws.send(
-                    {
-                        "type": "backfill_progress",
-                        "data": {"channel_id": original_channel_id, "sent": sent},
-                    }
-                )
-            finally:
-                await self.ws.send(
-                    {
-                        "type": "backfill_stream_end",
-                        "data": {"channel_id": original_channel_id},
-                    }
-                )
-            return
-
-        logger.debug(
-            "[backfill] guild OK | id=%s name=%s",
-            getattr(guild, "id", None),
-            getattr(guild, "name", None),
-        )
-
-        ch = guild.get_channel(original_channel_id)
-        if not ch:
-            try:
-                ch = await self.bot.fetch_channel(original_channel_id)
-                logger.debug(
-                    "[backfill] channel fetched | id=%s name=%s type=%s",
-                    getattr(ch, "id", None),
-                    getattr(ch, "name", None),
-                    getattr(getattr(ch, "type", None), "value", None),
-                )
-            except Exception as e:
-                logger.error(
-                    "[backfill] ⛔ cannot fetch channel | id=%s err=%s",
-                    original_channel_id,
-                    e,
-                )
-                try:
-                    await self.ws.send(
-                        {
-                            "type": "backfill_progress",
-                            "data": {"channel_id": original_channel_id, "sent": sent},
-                        }
-                    )
-                finally:
-                    await self.ws.send(
-                        {
-                            "type": "backfill_stream_end",
-                            "data": {"channel_id": original_channel_id},
-                        }
-                    )
-                return
-        else:
-            logger.debug(
-                "[backfill] channel OK | id=%s name=%s type=%s",
-                getattr(ch, "id", None),
-                getattr(ch, "name", None),
-                getattr(getattr(ch, "type", None), "value", None),
-            )
-
-        if (
-            self.host_guild_id
-            and getattr(getattr(ch, "guild", None), "id", None) != self.host_guild_id
-        ):
-            logger.warning(
-                "[backfill] channel is not in host guild | got_guild=%s expected=%s (was a clone id passed?)",
-                getattr(getattr(ch, "guild", None), "id", None),
-                self.host_guild_id,
-            )
-
-        ALLOWED_TYPES = {MessageType.default}
-        for _name in ("reply", "application_command", "context_menu_command"):
-            _t = getattr(MessageType, _name, None)
-            if _t is not None:
-                ALLOWED_TYPES.add(_t)
-        logger.debug(
-            "[backfill] allowed message types: %s",
-            sorted(getattr(t, "value", str(t)) for t in ALLOWED_TYPES),
-        )
-
-        def _is_normal(msg) -> bool:
-            try:
-                if callable(getattr(msg, "is_system", None)) and msg.is_system():
-                    return False
-            except Exception:
-                pass
-            if getattr(getattr(msg, "author", None), "system", False):
-                return False
-            if getattr(msg, "type", None) not in ALLOWED_TYPES:
-                return False
-            return True
-
-        if after_iso and after_dt:
-            logger.debug(
-                "[backfill] since filter parsed | utc=%s", after_dt.isoformat()
-            )
-        elif after_iso and not after_dt:
-            logger.warning(
-                "[backfill] since filter parse failed | after_iso=%r (ignoring)",
-                after_iso,
-            )
-
-        if before_iso and before_dt:
-            logger.debug(
-                "[backfill] before filter parsed | utc=%s", before_dt.isoformat()
-            )
-        elif before_iso and not before_dt:
-            logger.warning(
-                "[backfill] before filter parse failed | before_iso=%r (ignoring)",
-                before_iso,
-            )
-
-        try:
-
-            async def emit_msg(m):
-                nonlocal sent, skipped, last_ping, last_log
-                if not _is_normal(m):
-                    skipped += 1
-                    return
-
-                raw = m.content or ""
-                system = getattr(m, "system_content", "") or ""
-                content = system if (not raw and system) else raw
-                author = (
-                    "System"
-                    if (not raw and system)
-                    else getattr(m.author, "name", "Unknown")
-                )
-
-                raw_embeds = [e.to_dict() for e in m.embeds]
-                mention_map = await self.msg.build_mention_map(m, raw_embeds)
-                embeds = [
-                    self.msg.sanitize_embed_dict(e, m, mention_map) for e in raw_embeds
-                ]
-                content = self.msg.sanitize_inline(content, m, mention_map)
-                stickers_payload = self.msg.stickers_payload(getattr(m, "stickers", []))
-
-                await self.ws.send(
-                    {
-                        "type": "message",
-                        "data": {
-                            "guild_id": getattr(m.guild, "id", None),
-                            "message_id": getattr(m, "id", None),
-                            "channel_id": m.channel.id,
-                            "channel_name": getattr(m.channel, "name", None),
-                            "channel_type": (
-                                getattr(m.channel, "type", None).value
-                                if getattr(m.channel, "type", None)
-                                else None
-                            ),
-                            "author": author,
-                            "author_id": getattr(m, "author", None)
-                            and getattr(m.author, "id", None),
-                            "avatar_url": (
-                                str(m.author.display_avatar.url)
-                                if getattr(m.author, "display_avatar", None)
-                                else None
-                            ),
-                            "content": content,
-                            "embeds": embeds,
-                            "attachments": [
-                                {"url": a.url, "filename": a.filename, "size": a.size}
-                                for a in m.attachments
-                            ],
-                            "stickers": stickers_payload,
-                            "__backfill__": True,
-                        },
-                    }
-                )
-                sent += 1
-                await asyncio.sleep(0.02) # slight yield
-
-                now = loop.time()
-                if sent % PROGRESS_EVERY == 0 or (now - last_ping) >= 2.0:
-                    await self.ws.send(
-                        {
-                            "type": "backfill_progress",
-                            "data": {"channel_id": original_channel_id, "sent": sent},
-                        }
-                    )
-                    last_ping = now
-
-                if (now - last_log) >= LOG_EVERY_SEC:
-                    dt = now - t0
-                    rate = (sent / dt) if dt > 0 else 0.0
-                    logger.debug(
-                        "[backfill] progress | channel=%s sent=%d skipped=%d rate=%.1f msg/s",
-                        original_channel_id,
-                        sent,
-                        skipped,
-                        rate,
-                    )
-                    last_log = now
-
-            n = _coerce_int(last_n)
-
-            if n and n > 0:
-
-                buf = []
-                logger.debug(
-                    "[backfill] mode=last_n | n=%d %s",
-                    n,
-                    (
-                        f"(after {after_dt.isoformat()})"
-                        if after_dt
-                        else "(no since bound)"
-                    ),
-                )
-                async for m in ch.history(
-                    limit=n, oldest_first=False, after=after_dt, before=before_dt
-                ):
-                    buf.append(m)
-
-                total = sum(1 for m in buf if _is_normal(m))
-                logger.debug(
-                    "[backfill] fetched buffer | size=%d, total_normal=%d",
-                    len(buf),
-                    total,
-                )
-
-                await self.ws.send(
-                    {
-                        "type": "backfill_progress",
-                        "data": {"channel_id": original_channel_id, "total": total},
-                    }
-                )
-
-                for m in reversed(buf):
-                    await emit_msg(m)
-
-            else:
-
-                logger.debug(
-                    "[backfill] mode=%s | streaming oldest→newest%s",
-                    "since" if after_dt else "all",
-                    f" (after {after_dt.isoformat()})" if after_dt else "",
-                )
-                buf = [
-                    m
-                    async for m in ch.history(
-                        limit=None, oldest_first=True, after=after_dt, before=before_dt
-                    )
-                ]
-                total = sum(1 for m in buf if _is_normal(m))
-                logger.debug(
-                    "[backfill] pre-count complete | fetched=%d total_normal=%d",
-                    len(buf),
-                    total,
-                )
-
-                await self.ws.send(
-                    {
-                        "type": "backfill_progress",
-                        "data": {"channel_id": original_channel_id, "total": total},
-                    }
-                )
-
-                for m in buf:
-                    await emit_msg(m)
-
-        except Forbidden as e:
-            logger.debug(
-                "[backfill] history forbidden | channel=%s err=%s",
-                original_channel_id,
-                e,
-            )
-        except HTTPException as e:
-            logger.warning(
-                "[backfill] HTTP error | channel=%s err=%s", original_channel_id, e
-            )
-        except Exception as e:
-            logger.exception(
-                "[backfill] unexpected error | channel=%s err=%s",
-                original_channel_id,
-                e,
-            )
-        finally:
-            try:
-                await self.ws.send(
-                    {
-                        "type": "backfill_progress",
-                        "data": {"channel_id": original_channel_id, "sent": sent},
-                    }
-                )
-            except Exception:
-                pass
-
-            dur = loop.time() - t0
-            logger.debug(
-                "[backfill] STREAM END | channel=%s mode=%s sent=%d skipped=%d dur=%.1fs",
-                original_channel_id,
-                mode,
-                sent,
-                skipped,
-                dur,
-            )
-            await self.ws.send(
-                {
-                    "type": "backfill_stream_end",
-                    "data": {"channel_id": original_channel_id},
-                }
-            )
-
     def _guild_row_from_obj(self, g: discord.Guild) -> dict:
         try:
             icon_url = str(g.icon.url) if getattr(g, "icon", None) else None
@@ -1894,611 +1470,6 @@ class ClientListener:
                 self.db.delete_guild(gid)
         except Exception:
             logger.exception("[guilds] snapshot failed (outer)")
-
-    async def _run_export_messages_task(self, d, guild):
-        import asyncio, os, json, time, re, uuid
-        from datetime import datetime, timezone
-
-        # Optional dependency for downloading media
-        try:
-            import aiohttp
-        except Exception:
-            aiohttp = None  # we'll guard usage later
-
-        logger = (
-            getattr(self, "log", None)
-            or getattr(self, "logger", None)
-            or __import__("logging").getLogger("export")
-        )
-
-        def _safe(s: str, n: int = 64) -> str:
-            try:
-                return s if len(s) <= n else (s[:n] + "…")
-            except Exception:
-                return "<str>"
-
-        def _parse_iso(s):
-            try:
-                return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(
-                    timezone.utc
-                )
-            except Exception:
-                return None
-
-        # ---- Inputs & basics
-        chan_id_raw = (d.get("channel_id") or "").strip() or None
-        user_id_raw = (d.get("user_id") or "").strip() or None
-        webhook_url = (d.get("webhook_url") or "").strip() or None
-        only_with_attachments = bool(
-            d.get("has_attachments", False)
-        )  # legacy toggle (kept)
-        after_dt = _parse_iso(d.get("after_iso") or None)
-        before_dt = _parse_iso(d.get("before_iso") or None)
-        user_id = int(user_id_raw) if (user_id_raw and user_id_raw.isdigit()) else None
-
-        # Throttles
-        scan_sleep = 0.0  # scanning
-        send_sleep = 2.0  # 2s between WS sends
-
-        gid_log = getattr(guild, "id", None)
-        gname = getattr(guild, "name", "") or "Unknown"
-        wh_tail = webhook_url[-6:] if webhook_url else "None"
-        do_forward = bool(webhook_url)
-
-        # ---- UI filters (include-style with sensible defaults)
-        filters = d.get("filters") or {}
-        F = {
-            "embeds": filters.get("embeds", True),
-            "attachments": filters.get("attachments", True),
-            "att_types": (
-                filters.get("att_types")
-                or {"images": True, "videos": True, "audio": True, "other": True}
-            ),
-            "links": filters.get("links", True),
-            "emojis": filters.get("emojis", True),
-            # Include text content if True; if False, exclude messages that have content
-            "has_content": bool(filters.get("has_content", True)),
-            "word_on": filters.get("word_on", False),
-            "word": (filters.get("word") or "").strip(),
-            "replies": filters.get("replies", True),
-            "bots": filters.get("bots", True),
-            "system": filters.get("system", True),
-            "min_length": int(filters.get("min_length", 0) or 0),
-            "min_reactions": int(filters.get("min_reactions", 0) or 0),
-            "pinned": filters.get("pinned", True),
-            "stickers": filters.get("stickers", True),
-            "mentions": filters.get("mentions", True),
-            # NEW: media download selection (all default False)
-            "download_media": (
-                filters.get("download_media")
-                or {"images": False, "videos": False, "audio": False, "other": False}
-            ),
-        }
-
-        # Normalize attachment flags
-        if not F["attachments"]:
-            F["att_types"] = {
-                "images": False,
-                "videos": False,
-                "audio": False,
-                "other": False,
-            }
-        else:
-            kinds = F["att_types"]
-            if not any(
-                bool(kinds.get(k)) for k in ("images", "videos", "audio", "other")
-            ):
-                # Attachments ON but no subtypes selected → treat as OFF
-                F["attachments"] = False
-
-        if after_dt and before_dt and after_dt > before_dt:
-            # Swap silently to avoid no-results range
-            after_dt, before_dt = before_dt, after_dt
-
-        _link_re = re.compile(r"https?://\S+", re.I)
-        # Matches custom <:name:id> and a broad range of Unicode emoji
-        _emoji_re = re.compile(r"(<a?:\w+:\d+>)|([\U0001F300-\U0001FAFF])")
-        word_re = (
-            re.compile(re.escape(F["word"]), re.I)
-            if (F["word_on"] and F["word"])
-            else None
-        )
-
-        def _att_kind(att):
-            # att can be discord.Attachment or a dict from serialized message
-            if hasattr(att, "content_type"):
-                ct = (getattr(att, "content_type", "") or "").lower()
-                name = (getattr(att, "filename", "") or "").lower()
-            else:
-                ct = (att.get("content_type") or "").lower()
-                name = (att.get("filename") or "").lower()
-
-            def has_any(kw):
-                return any(k in ct or name.endswith(k) for k in kw)
-
-            if has_any(
-                ("image/", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff")
-            ):
-                return "images"
-            if has_any(("video/", ".mp4", ".mov", ".webm", ".mkv", ".avi")):
-                return "videos"
-            if has_any(("audio/", ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac")):
-                return "audio"
-            return "other"
-
-        def _has_any_attachment_type(msg):
-            atts = getattr(msg, "attachments", None)
-            if atts is None and isinstance(msg, dict):
-                atts = msg.get("attachments") or []
-            if not atts:
-                return False
-            for a in atts:
-                k = _att_kind(a)
-                if F["att_types"].get(k, True):
-                    return True
-            return False
-
-        def _passes_filters(msg):
-            # Bots/system
-            if isinstance(msg, dict):
-                is_bot = bool(((msg.get("author") or {}).get("bot")) or False)
-            else:
-                is_bot = bool(getattr(getattr(msg, "author", None), "bot", False))
-            if not F["bots"] and is_bot:
-                return False
-
-            if not F["system"]:
-                mtype = getattr(msg, "type", None)
-                if mtype and getattr(mtype, "name", "").lower() != "default":
-                    return False
-
-            # Length & text
-            content = (
-                msg.get("content")
-                if isinstance(msg, dict)
-                else getattr(msg, "content", "")
-            ) or ""
-            if not F["has_content"] and content.strip():
-                # If include-content is False, exclude messages that have content
-                return False
-            if F["min_length"] > 0 and len(content) < F["min_length"]:
-                return False
-
-            # Reactions
-            reacts = (
-                msg.get("reactions")
-                if isinstance(msg, dict)
-                else getattr(msg, "reactions", [])
-            ) or []
-            if F["min_reactions"] > 0:
-
-                def _rcount(r):
-                    return int(
-                        (
-                            r.get("count")
-                            if isinstance(r, dict)
-                            else getattr(r, "count", 0)
-                        )
-                        or 0
-                    )
-
-                total_reacts = sum(_rcount(r) for r in reacts)
-                if total_reacts < F["min_reactions"]:
-                    return False
-
-            # Pinned
-            pinned = bool(
-                (
-                    msg.get("pinned")
-                    if isinstance(msg, dict)
-                    else getattr(msg, "pinned", False)
-                )
-                or False
-            )
-            if not F["pinned"] and pinned:
-                return False
-
-            # Stickers
-            stickers = (
-                msg.get("stickers")
-                if isinstance(msg, dict)
-                else getattr(msg, "stickers", [])
-            ) or []
-            if not F["stickers"] and stickers:
-                return False
-
-            # Mentions
-            if not F["mentions"]:
-                if isinstance(msg, dict):
-                    if (
-                        (msg.get("mentions") or [])
-                        or (msg.get("role_mentions") or [])
-                        or (msg.get("channel_mentions") or [])
-                    ):
-                        return False
-                else:
-                    if (
-                        (getattr(msg, "mentions", []) or [])
-                        or (getattr(msg, "role_mentions", []) or [])
-                        or (getattr(msg, "channel_mentions", []) or [])
-                    ):
-                        return False
-
-            # Replies (has resolved reference)
-            if isinstance(msg, dict):
-                ref = msg.get("reference")
-                has_ref = bool(ref and ref.get("resolved"))
-            else:
-                ref = getattr(msg, "reference", None)
-                has_ref = bool(ref and getattr(ref, "resolved", None))
-            if not F["replies"] and has_ref:
-                return False
-
-            # Embeds
-            embeds = (
-                msg.get("embeds")
-                if isinstance(msg, dict)
-                else getattr(msg, "embeds", [])
-            ) or []
-            if not F["embeds"] and embeds:
-                return False
-
-            # Attachments (+ enforce selected kinds)
-            atts = (
-                msg.get("attachments")
-                if isinstance(msg, dict)
-                else getattr(msg, "attachments", [])
-            ) or []
-            if not F["attachments"]:
-                if atts:
-                    return False
-            else:
-                if atts and not _has_any_attachment_type(msg):
-                    return False
-
-            # Links
-            if not F["links"]:
-                if _link_re.search(content):
-                    return False
-                for e in embeds:
-                    if isinstance(e, dict):
-                        vals = (e.get("url"), e.get("title"), e.get("description"))
-                    else:
-                        vals = (
-                            getattr(e, "url", None),
-                            getattr(e, "title", None),
-                            getattr(e, "description", None),
-                        )
-                    if any(v and _link_re.search(str(v)) for v in vals):
-                        return False
-
-            # Emojis
-            if not F["emojis"] and _emoji_re.search(content):
-                return False
-
-            # Include word (must appear if enabled & provided)
-            if word_re and not word_re.search(content):
-                return False
-
-            return True
-
-        # ---- Resolve channels safely
-        me = None
-        try:
-            me = guild.get_member(getattr(self.bot.user, "id", None))
-        except Exception:
-            me = getattr(guild, "me", None)
-
-        channels = []
-        if chan_id_raw:
-            ch = None
-            try:
-                ch = await self.bot.fetch_channel(int(chan_id_raw))
-            except Exception as e:
-                logger.debug(
-                    f"[export] fetch_channel({chan_id_raw}) failed: {e}; falling back to cache"
-                )
-                if chan_id_raw.isdigit():
-                    ch = self.bot.get_channel(int(chan_id_raw))
-            if ch:
-                channels = [ch]
-
-        if not channels:
-            if me:
-                channels = [
-                    c
-                    for c in getattr(guild, "text_channels", [])
-                    if c.permissions_for(me).read_message_history
-                ]
-            else:
-                channels = list(getattr(guild, "text_channels", []))
-
-        t0 = time.perf_counter()
-        logger.info(
-            f"[export] Start task guild={gid_log} ({gname}) "
-            f"filters: chan={chan_id_raw or 'ALL'}, user={user_id or 'ANY'}, "
-            f"attachments_only={only_with_attachments}, after={after_dt}, before={before_dt}, "
-            f"forward_webhook={do_forward}({('…'+wh_tail) if do_forward else '—'}), "
-            f"scan_sleep={scan_sleep}, send_sleep={send_sleep}, ui_filters={filters}"
-        )
-
-        if not channels:
-            logger.warning(
-                f"[export] No readable text channels in guild {gid_log}. Aborting."
-            )
-            await self.ws.send(
-                {
-                    "type": "export_messages_done",
-                    "data": {"guild_id": gid_log, "forwarded": 0, "scanned": 0},
-                }
-            )
-            return
-
-        ch_ids_preview = [getattr(c, "id", None) for c in channels[:8]]
-        more_note = "" if len(channels) <= 8 else f" (+{len(channels)-8} more)"
-        logger.info(
-            f"[export] Channels to scan: {len(channels)} -> {ch_ids_preview}{more_note}"
-        )
-
-        total_scanned = 0
-        total_matched = 0
-        forwarded = 0
-        buffer_rows = (
-            []
-        )  # Always buffer first so we can save JSON before any forwarding
-
-        # ---- Scan
-        for ch in channels:
-            cid = getattr(ch, "id", None)
-            cname = getattr(ch, "name", "") or "unknown"
-            logger.info(f"[export] Scanning channel #{cname} ({cid}) …")
-            ch_scanned = 0
-            ch_matched = 0
-
-            try:
-                kwargs = {"limit": None, "oldest_first": True}
-                if after_dt:
-                    kwargs["after"] = after_dt
-                if before_dt:
-                    kwargs["before"] = before_dt
-
-                async for msg in ch.history(**kwargs):
-                    ch_scanned += 1
-                    total_scanned += 1
-
-                    if user_id and getattr(msg.author, "id", None) != user_id:
-                        if scan_sleep:
-                            await asyncio.sleep(scan_sleep)
-                        continue
-
-                    # legacy toggle
-                    if only_with_attachments and not getattr(msg, "attachments", []):
-                        if scan_sleep:
-                            await asyncio.sleep(scan_sleep)
-                        continue
-
-                    # comprehensive UI filters
-                    if not _passes_filters(msg):
-                        if scan_sleep:
-                            await asyncio.sleep(scan_sleep)
-                        continue
-
-                    ch_matched += 1
-                    total_matched += 1
-
-                    serialized = self.msg.serialize(msg)
-                    buffer_rows.append(
-                        {
-                            "guild_id": getattr(guild, "id", None),
-                            "channel_id": getattr(ch, "id", None),
-                            "message": serialized,
-                        }
-                    )
-
-                    if ch_scanned % 200 == 0:
-                        logger.info(
-                            f"[export] Progress ch={cid}: scanned={ch_scanned}, matched={ch_matched}, "
-                            f"total_scanned={total_scanned}, total_matched={total_matched}, buffered={len(buffer_rows)}"
-                        )
-
-                    if scan_sleep:
-                        await asyncio.sleep(scan_sleep)
-            except Exception as e:
-                logger.warning(f"[export] Channel {cid} failed: {e}")
-                continue
-
-            logger.info(
-                f"[export] Done channel #{cname} ({cid}): scanned={ch_scanned}, matched={ch_matched}"
-            )
-
-        # ---- Save JSON snapshot first — /data/exports/<guild>/<YYYYMMDD-HHMMSS>/messages.json
-        json_file = None
-        media_root = None
-        try:
-            out_root = "/data/exports"
-            ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-            gid_str = str(getattr(guild, "id", "unknown"))
-            subdir = os.path.join(out_root, gid_str, ts)
-            os.makedirs(subdir, exist_ok=True)
-            json_file = os.path.join(subdir, "messages.json")
-            logger.info(
-                f"[export] Writing JSON snapshot ({len(buffer_rows)} messages) → {json_file}"
-            )
-            with open(json_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "guild_id": gid_str,
-                        "exported_at": ts + "Z",
-                        "count": len(buffer_rows),
-                        "messages": [row["message"] for row in buffer_rows],
-                    },
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            logger.info(f"[export] JSON saved: {json_file}")
-
-            # Prepare media dirs now; used only if downloads are requested
-            media_root = os.path.join(subdir, "media")
-            for k in ("images", "videos", "audio", "other"):
-                os.makedirs(os.path.join(media_root, k), exist_ok=True)
-        except Exception as e:
-            logger.warning(f"[export] Failed to write JSON: {e}")
-            json_file = None
-
-        # ---- NEW: Download attachments if requested
-        dl_cfg = F["download_media"] or {}
-        want_any_download = any(
-            dl_cfg.get(k, False) for k in ("images", "videos", "audio", "other")
-        )
-        media_report = {"images": 0, "videos": 0, "audio": 0, "other": 0, "errors": 0}
-
-        def _iter_attachment_links(msg_obj):
-            """Yield (kind, url, filename) from a serialized message object (dict)."""
-            m = msg_obj if isinstance(msg_obj, dict) else {}
-            atts = m.get("attachments") or []
-            for a in atts:
-                url = a.get("url") or a.get("proxy_url")
-                if (
-                    not url
-                    or not isinstance(url, str)
-                    or not url.lower().startswith(("http://", "https://"))
-                ):
-                    continue
-                kind = _att_kind(a)
-                filename = (
-                    a.get("filename")
-                    or os.path.basename(url.split("?", 1)[0])
-                    or f"{kind}-{uuid.uuid4().hex}"
-                )
-                yield (kind, url, filename)
-
-        async def _download_one(session, sem, kind, url, filename, dest_dir):
-            safe_name = filename
-            # ensure unique path
-            base, ext = os.path.splitext(safe_name)
-            if not base:
-                base = kind
-            out_path = os.path.join(dest_dir, f"{base}{ext}")
-            i = 0
-            while os.path.exists(out_path):
-                i += 1
-                out_path = os.path.join(dest_dir, f"{base}-{i}{ext}")
-
-            try:
-                async with sem:
-                    async with session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=180)
-                    ) as resp:
-                        if resp.status != 200:
-                            raise RuntimeError(f"HTTP {resp.status}")
-                        with open(out_path, "wb") as f:
-                            async for chunk in resp.content.iter_chunked(1 << 14):
-                                if chunk:
-                                    f.write(chunk)
-                return True, out_path, None
-            except Exception as e:
-                return False, out_path, str(e)
-
-        if want_any_download and aiohttp is None:
-            logger.warning(
-                "[export] Download requested but aiohttp not available. Skipping downloads."
-            )
-        elif want_any_download:
-            logger.info(f"[export] Downloading media per selection: {dl_cfg}")
-            sem = asyncio.Semaphore(4)  # tune concurrency
-            tasks = []
-
-            # Collect all candidate links from matched/serialized messages
-            for row in buffer_rows:
-                msg_obj = row.get("message") or {}
-                for kind, url, fname in _iter_attachment_links(msg_obj):
-                    if not dl_cfg.get(kind, False):
-                        continue
-                    dest = os.path.join(media_root, kind)
-                    tasks.append((kind, url, fname, dest))
-
-            if not tasks:
-                logger.info(
-                    "[export] No media matches selection; skipping download step."
-                )
-            else:
-                async with aiohttp.ClientSession() as session:
-                    results = await asyncio.gather(
-                        *[
-                            _download_one(session, sem, kind, url, fname, dest)
-                            for (kind, url, fname, dest) in tasks
-                        ],
-                        return_exceptions=False,
-                    )
-                # Tally results
-                for (kind, url, *_), res in zip(tasks, results):
-                    ok, path, err = res
-                    if ok:
-                        media_report[kind] += 1
-                    else:
-                        media_report["errors"] += 1
-                        logger.warning(
-                            f"[export] Download failed kind={kind} url={_safe(url)} err={err}"
-                        )
-
-                logger.info(f"[export] Media download complete: {media_report}")
-
-        # ---- Forward buffered messages if a webhook URL was provided
-        if do_forward and buffer_rows:
-            logger.info(
-                f"[export] Forwarding buffered messages: {len(buffer_rows)} → webhook(…{wh_tail})"
-            )
-            for idx, row in enumerate(buffer_rows, 1):
-                try:
-                    await self.ws.send(
-                        {
-                            "type": "export_message",
-                            "data": {
-                                "guild_id": row.get("guild_id"),
-                                "channel_id": row.get("channel_id"),
-                                "webhook_url": webhook_url,
-                                "message": row.get("message"),
-                            },
-                        }
-                    )
-                    forwarded += 1
-                    if send_sleep:
-                        await asyncio.sleep(send_sleep)  # 2s between WS sends
-                except Exception as e:
-                    logger.warning(
-                        f"[📤] export_message send failed (post-JSON) idx={idx}: {e}"
-                    )
-                    break
-
-                if idx % 200 == 0:
-                    logger.info(
-                        f"[export] Forwarded {idx}/{len(buffer_rows)} (total_forwarded={forwarded})"
-                    )
-        else:
-            logger.info("[export] No webhook URL provided — skipping forwarding step.")
-
-        dur = time.perf_counter() - t0
-        logger.info(
-            f"[export] Complete guild={gid_log} ({gname}) scanned={total_scanned}, matched={total_matched}, "
-            f"forwarded={forwarded}, json={'saved '+json_file if json_file else 'none'}, "
-            f"media_dl={media_report if want_any_download else 'skipped'}, elapsed={dur:.1f}s"
-        )
-
-        # ---- Done – notify server (include media report if present)
-        try:
-            done_payload = {
-                "guild_id": getattr(guild, "id", None),
-                "forwarded": forwarded,
-                "scanned": total_scanned,
-                "matched": total_matched,
-                **({"json_path": json_file} if json_file else {}),
-            }
-            if want_any_download:
-                done_payload["media_download"] = media_report
-            await self.ws.send({"type": "export_messages_done", "data": done_payload})
-        except Exception as e:
-            logger.debug(f"[export] emit export_messages_done failed: {e}")
 
     async def _shutdown(self):
         """
