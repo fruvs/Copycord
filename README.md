@@ -209,7 +209,7 @@ This will pull the latest images and start the web ui: http://localhost:8080
 ##
 
 > [!IMPORTANT]
-> Copycord uses self‑bot methods (listening via a user token), which violates Discord’s Terms of Service and may result in account termination. Although our two‑step design reduces exposure, **use at your own risk**. We strongly recommend using an alternate account for the listening component.
+> Copycord uses self-bot functionality, which is against Discord’s Terms of Service and could lead to account suspension or termination. While uncommon, we strongly recommend using an alternate account to minimize risk.
 
 ## Contributing & Support
 
