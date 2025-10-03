@@ -86,7 +86,7 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 ### Setup
 
 1. **Prepare the clone server**  
-   Create a new Discord server to receive mirrored content.
+   Create a new Discord server to receive mirrored content and house your bot.
 
 2. **Obtain your user token**
 
