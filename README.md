@@ -10,21 +10,70 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 
 > [!IMPORTANT]  
 > **✨ Copycord Features**
->
-> - **Full Server Cloning** – Instantly mirror categories, channels, and message history from any target server—with the option to include roles, emojis, and stickers, all fully controlled through the web UI.
-> - **Live Message Forwarding** – Every new message is forwarded in real time to your clone via webhooks, keeping both servers perfectly in sync including edits and deletes.
-> - **Dynamic Structure Sync** – Copycord constantly watches for changes in the source server (new channels, renames, role updates) and applies them to your clone automatically.
-> - **Advanced Channel Filtering** – Choose exactly which channels to include or exclude for maximum control over your clone’s layout.
-> - **Custom Branding** – Rename channels, customize webhook names/icons, and make the clone feel like your own personalized server.
-> - **Smart Message Filtering** – Automatically block or drop unwanted messages based on custom keyword rules.
-> - **Member List Scraper** – Use the member scraper to grab User IDs, Usernames, Avatars, and Bios from any server.
-> - **Deep History Import** – Clone an entire channel’s message history, not just the new ones.
-> - **Universal Message Export** - Export all messages from any guild into a JSON file with optional filtering, Webhook forwarding, and attachment downloading.
-> - **DM History Export** – Export all DM messages from any user's inbox into a JSON file with optional Webhook forwarding.
-> - **Universal Message Export** – Export all messages from any guild into a JSON file with optional Webhook forwarding.
-> - **Real-Time DM Alerts** – Get instant DM notifications for key messages across any guild — and subscribe your members to get notifications too.
-> - **Your Own Bot, Your Rules** – Run a fully independent Discord bot that you control—no restrictions.
-> - **Sleek Web Dashboard** – Manage everything through a modern, easy-to-use web app.
+<details>
+<summary><b>Full Server Cloning</b></summary>
+Instantly mirror categories, channels, and message history from any target server—with the option to include roles, emojis, and stickers, all fully controlled through the web UI.
+</details>
+
+<details>
+<summary><b>Live Message Forwarding</b></summary>
+Every new message is forwarded in real time to your clone via webhooks, keeping both servers perfectly in sync including edits and deletes.
+</details>
+
+<details>
+<summary><b>Dynamic Structure Sync</b></summary>
+Copycord constantly watches for changes in the source server (new channels, renames, role updates) and applies them to your clone automatically.
+</details>
+
+<details>
+<summary><b>Advanced Channel Filtering</b></summary>
+Choose exactly which channels to include or exclude for maximum control over your clone’s layout.
+</details>
+
+<details>
+<summary><b>Custom Branding</b></summary>
+Rename channels, customize webhook names/icons, and make the clone feel like your own personalized server.
+</details>
+
+<details>
+<summary><b>Smart Message Filtering</b></summary>
+Automatically block or drop unwanted messages based on custom keyword rules.
+</details>
+
+<details>
+<summary><b>Member List Scraper</b></summary>
+Use the member scraper to grab User IDs, Usernames, Avatars, and Bios from any server.
+</details>
+
+<details>
+<summary><b>Deep History Import</b></summary>
+Clone an entire channel’s message history, not just the new ones.
+</details>
+
+<details>
+<summary><b>Universal Message Export</b></summary>
+Export all messages from any guild into a JSON file with optional filtering, Webhook forwarding, and attachment downloading.
+</details>
+
+<details>
+<summary><b>DM History Export</b></summary>
+Export all DM messages from any user's inbox into a JSON file with optional Webhook forwarding.
+</details>
+
+<details>
+<summary><b>Real-Time DM Alerts</b></summary>
+Get instant DM notifications for key messages across any guild — and subscribe your members to get notifications too.
+</details>
+
+<details>
+<summary><b>Your Own Bot, Your Rules</b></summary>
+Run a fully independent Discord bot that you control—no restrictions.
+</details>
+
+<details>
+<summary><b>Sleek Web Dashboard</b></summary>
+Manage everything through a modern, easy-to-use web app.
+</details>
 
 ## Getting Started
 
