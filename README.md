@@ -19,6 +19,7 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 > - **Smart Message Filtering** – Automatically block or drop unwanted messages based on custom keyword rules.
 > - **Member List Scraper** – Use the member scraper to grab User IDs, Usernames, Avatars, and Bios from any server.
 > - **Deep History Import** – Clone an entire channel’s message history, not just the new ones.
+> - **Universal Message Export** - Export all messages from any guild into a JSON file with optional filtering, Webhook forwarding, and attachment downloading.
 > - **DM History Export** – Export all DM messages from any user's inbox into a JSON file with optional Webhook forwarding.
 > - **Universal Message Export** – Export all messages from any guild into a JSON file with optional Webhook forwarding.
 > - **Real-Time DM Alerts** – Get instant DM notifications for key messages across any guild — and subscribe your members to get notifications too.
