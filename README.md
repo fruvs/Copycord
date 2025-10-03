@@ -12,10 +12,10 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 > **✨ Copycord Features**
 >
 > - **Full Server Cloning** – Instantly mirror categories, channels, and message history from any target server—with the option to include roles, emojis, and stickers, all fully controlled through the web UI.
-> - **Live Message Forwarding** – Every new message is forwarded in real time to your clone via webhooks, keeping both servers perfectly in sync.
+> - **Live Message Forwarding** – Every new message is forwarded in real time to your clone via webhooks, keeping both servers perfectly in sync including edits and deletes.
 > - **Dynamic Structure Sync** – Copycord constantly watches for changes in the source server (new channels, renames, role updates) and applies them to your clone automatically.
 > - **Advanced Channel Filtering** – Choose exactly which channels to include or exclude for maximum control over your clone’s layout.
-> - **Custom Branding** – Rename channels, customize webhook names/icons, and make the clone feel like your own personalized community.
+> - **Custom Branding** – Rename channels, customize webhook names/icons, and make the clone feel like your own personalized server.
 > - **Smart Message Filtering** – Automatically block or drop unwanted messages based on custom keyword rules.
 > - **Member List Scraper** – Use the member scraper to grab User IDs, Usernames, Avatars, and Bios from any server.
 > - **Deep History Import** – Clone an entire channel’s message history, not just the new ones.
@@ -23,7 +23,7 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 > - **Universal Message Export** – Export all messages from any guild into a JSON file with optional Webhook forwarding.
 > - **Real-Time DM Alerts** – Get instant DM notifications for key messages across any guild — and subscribe your members to get notifications too.
 > - **Your Own Bot, Your Rules** – Run a fully independent Discord bot that you control—no restrictions.
-> - **Sleek Web Dashboard** – Manage everything through a modern, easy-to-use web interface.
+> - **Sleek Web Dashboard** – Manage everything through a modern, easy-to-use web app.
 
 ## Getting Started
 
