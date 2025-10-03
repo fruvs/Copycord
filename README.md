@@ -53,7 +53,7 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 >
 > <details>
 > <summary><b>Universal Message Export</b></summary>
-> Export all messages from any guild into a JSON file with optional filtering, Webhook forwarding, and attachment downloading.
+> Export all messages from any server into a JSON file with optional filtering, Webhook forwarding, and attachment downloading.
 > </details>
 >
 > <details>
