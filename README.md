@@ -63,7 +63,7 @@ Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entir
 >
 > <details>
 > <summary><b>Real-Time DM Alerts</b></summary>
-> Get instant DM notifications for key messages across any guild — and subscribe your members to get notifications too.
+> Get instant DM notifications for key messages from any server — and subscribe your clone server members to get notifications too.
 > </details>
 >
 > <details>
