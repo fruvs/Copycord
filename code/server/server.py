@@ -43,7 +43,7 @@ from server.emojis import EmojiManager
 from server.stickers import StickerManager
 from server.roles import RoleManager
 from server.backfill import BackfillManager, BackfillTracker
-from server.helpers import OnJoinService, VerifyController, WebhookDMExporter
+from server.helpers import OnJoinService, VerifyController, WebhookDMExporter, OnCloneJoin
 from server.permission_sync import ChannelPermissionSync
 
 LOG_DIR = "/data"
@@ -108,6 +108,7 @@ class ServerReceiver:
         self.bot.event(self.on_ready)
         self.bot.event(self.on_webhooks_update)
         self.bot.event(self.on_guild_channel_delete)
+        self.bot.event(self.on_member_join)
         self._default_avatar_bytes: Optional[bytes] = None
         self._ws_task: asyncio.Task | None = None
         self._sitemap_task: asyncio.Task | None = None
@@ -139,6 +140,7 @@ class ServerReceiver:
         self._bf_throttle: dict[int, dict] = {}
         self._bf_delay = 2.0
         orig_on_connect = self.bot.on_connect
+        self.onclonejoin = OnCloneJoin(self.bot, self.db)
         self.bus = AdminBus(
             role="server", logger=logger, admin_ws_url=self.config.ADMIN_WS_URL
         )
@@ -282,6 +284,26 @@ class ServerReceiver:
             self._sitemap_task = asyncio.create_task(self.process_sitemap_queue())
             self._processor_started = True
             self._prune_old_messages_loop()
+
+    async def on_member_join(self, member: discord.Member):
+        g = getattr(member, "guild", None)
+        try:
+            if not g:
+                return
+
+            if int(g.id) != int(self.clone_guild_id):
+                return
+
+            logger.info(
+                "[👤] %s (%s) has joined the server!",
+                member.name, member.id
+            )
+            await self.onclonejoin.handle_member_join(member)
+        except Exception:
+            logger.exception(
+                "[👤] on_member_join: unhandled exception guild_id=%s member_id=%s",
+                getattr(g, "id", "unknown"), getattr(member, "id", "unknown")
+            )
 
     def _canonical_webhook_name(self) -> str:
 
