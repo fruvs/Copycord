@@ -130,7 +130,7 @@ copycord/
 ```yaml
 services:
   admin:
-    image: ghcr.io/copycord/copycord:v2.4.0
+    image: ghcr.io/copycord/copycord:v2.5.0
     container_name: copycord-admin
     environment:
       - ROLE=admin
@@ -141,7 +141,7 @@ services:
     restart: unless-stopped
 
   server:
-    image: ghcr.io/copycord/copycord:v2.4.0
+    image: ghcr.io/copycord/copycord:v2.5.0
     container_name: copycord-server
     environment:
       - ROLE=server
@@ -152,7 +152,7 @@ services:
     restart: unless-stopped
 
   client:
-    image: ghcr.io/copycord/copycord:v2.4.0
+    image: ghcr.io/copycord/copycord:v2.5.0
     container_name: copycord-client
     environment:
       - ROLE=client
@@ -197,6 +197,7 @@ This will pull the latest images and start the web ui: http://localhost:8080
 | `CLONE_STICKER`           | true    | Clone stickers                                                        |
 | `CLONE_ROLES`             | true    | Clone roles                                                           |
 | `MIRROR_ROLE_PERMISSIONS` | false   | Clone role permission settings (does not apply to channels)           |
+| `MIRROR_CHANNEL_PERMISSIONS` | false   | Mirror channel permissions from the host                           |
 | `ENABLE_CLONING`          | true    | Turn cloning on/off for the target server (listener mode if disabled) |
 | `LOG_LEVEL`               | INFO    | Level of logs to show (`INFO` / `DEBUG`)                              |
 
