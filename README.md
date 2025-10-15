@@ -8,7 +8,7 @@ _⭐️ Love Copycord? Give us a star and join the conversation in our Discord c
 
 Copycord is the ultimate Discord server mirroring tool. Effortlessly clone entire servers including channels, roles, emojis, and history while keeping everything in perfect sync with real-time message forwarding and structure updates. With powerful filters, custom branding options, DM and export tools, and a sleek web dashboard, Copycord gives you complete control to replicate, manage, and customize servers your way.
 
-> [!IMPORTANT]
+> [!TIP]
 > **✨ Copycord Features**
 >
 > <details>
@@ -209,7 +209,7 @@ This will pull the latest images and start the web ui: http://localhost:8080
 
 ##
 
-> [!IMPORTANT]
+> [!WARNING]
 > Copycord uses self-bot functionality, which is against Discord’s Terms of Service and could lead to account suspension or termination. While uncommon, we strongly recommend using an alternate account to minimize risk.
 
 ## Contributing & Support
