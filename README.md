@@ -1,6 +1,6 @@
-[![Release](https://img.shields.io/github/v/release/Copycord/Copycord?label=Release&color=837ED7)](https://github.com/Copycord/Copycord/releases/latest)
-[![Downloads](https://img.shields.io/badge/dynamic/json?url=https://ghcr-badge.elias.eu.org/api/Copycord/Copycord/copycord&query=downloadCount&label=Downloads&logo=Github&color=837ED7)](https://github.com/Copycord/Copycord/pkgs/container/copycord)
-[![Discord](https://img.shields.io/discord/1406152440377638952?color=837ED7&label=Discord&logo=discord)](https://discord.gg/ArFdqrJHBj)
+[![Release](https://img.shields.io/github/v/release/Copycord/Copycord?label=Release&color=718956)](https://github.com/Copycord/Copycord/releases/latest)
+[![Downloads](https://img.shields.io/badge/dynamic/json?url=https://ghcr-badge.elias.eu.org/api/Copycord/Copycord/copycord&query=downloadCount&label=Downloads&logo=Github&color=718956)](https://github.com/Copycord/Copycord/pkgs/container/copycord)
+[![Discord](https://img.shields.io/discord/1406152440377638952?color=718956&label=Discord&logo=discord)](https://discord.gg/ArFdqrJHBj)
 
 _⭐️ Love Copycord? Give us a star and join the conversation in our Discord community!_
 
