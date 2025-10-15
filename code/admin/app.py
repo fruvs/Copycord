@@ -1000,13 +1000,16 @@ async def logs(which: str, tail: int = 20000):
 
     return PlainTextResponse("No logs yet.", status_code=404)
 
+
 @app.on_event("startup")
 async def _startup_links():
     await startup_links(app, templates_env=templates.env, set_jinja_global=True)
 
+
 @app.on_event("shutdown")
 async def _shutdown():
     await shutdown_links(app)
+
 
 @app.on_event("startup")
 async def _apply_db_log_level_and_banner():
@@ -1326,6 +1329,8 @@ def _enrich_from_bus(ctrl: dict, bus: dict) -> dict:
         out["pid"] = bus["pid"]
     if "running" not in out and "running" in bus:
         out["running"] = bus["running"]
+    if "discord" not in out and isinstance(bus.get("discord"), dict):
+        out["discord"] = bus["discord"]
     out.setdefault("status", "")
     return out
 
@@ -1369,8 +1374,8 @@ async def _collect_status() -> dict:
     client_state = _derive_state(s_client)
     both_running = (server_state == "running") and (client_state == "running")
 
-    server_ready = _is_discord_ready(s_server)
-    client_ready = _is_discord_ready(s_client)
+    server_ready = _is_discord_ready(s_server) or _is_discord_ready(bus_srv)
+    client_ready = _is_discord_ready(s_client) or _is_discord_ready(bus_cli)
     both_ready = server_ready and client_ready
 
     res = {
@@ -1607,6 +1612,64 @@ async def channels_api():
     return {"items": out}
 
 
+@app.get("/api/backfills/inflight")
+async def api_backfills_inflight():
+
+    res = await _ws_cmd(SERVER_AGENT_URL, {"type": "backfills_status_query"})
+
+    items = (res or {}).get("data", {}).get("items", {})
+    return JSONResponse({"ok": True, "items": items})
+
+
+@app.get("/api/backfills/resume-info", response_class=JSONResponse)
+async def api_backfills_resume_info(channel_id: int):
+    try:
+        cid = int(channel_id)
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "invalid-channel_id"}, status_code=400
+        )
+
+    row = db.backfill_get_incomplete_for_channel(cid)
+
+    payload = {
+        "channel_id": str(cid),
+        "active": bool(row is not None),
+        "resumable": False,
+        "run_id": None,
+        "delivered": None,
+        "expected_total": None,
+        "checkpoint": {
+            "last_orig_message_id": None,
+            "last_orig_timestamp": None,
+        },
+        "clone_channel_id": None,
+        "range": None,
+        "started_at": None,
+        "updated_at": None,
+    }
+
+    if row:
+        payload.update(
+            {
+                "resumable": True,
+                "run_id": row.get("run_id"),
+                "delivered": row.get("delivered"),
+                "expected_total": row.get("expected_total"),
+                "checkpoint": {
+                    "last_orig_message_id": row.get("last_orig_message_id"),
+                    "last_orig_timestamp": row.get("last_orig_timestamp"),
+                },
+                "clone_channel_id": row.get("clone_channel_id"),
+                "range": json.loads(row.get("range_json") or "{}"),
+                "started_at": row.get("started_at"),
+                "updated_at": row.get("updated_at"),
+            }
+        )
+
+    return JSONResponse({"ok": True, "data": payload})
+
+
 @app.post("/api/backfill/start", response_class=JSONResponse)
 async def api_backfill_start(payload: dict = Body(...)):
     try:
@@ -1651,6 +1714,8 @@ async def api_backfill_start(payload: dict = Body(...)):
     last_n = payload.get("last_n")
 
     data = {"channel_id": channel_id}
+
+    # Normal range params
     if after_iso:
         data["after_iso"] = str(after_iso)
     if before_iso:
@@ -1676,7 +1741,20 @@ async def api_backfill_start(payload: dict = Body(...)):
             else (data.get("last_n") if "last_n" in data else None)
         )
         data["range"] = {"mode": mode, "value": rng_val} if mode else None
+
+    if bool(payload.get("resume")):
+        data["resume"] = True
+        cp = payload.get("checkpoint") or {}
+        after_id = cp.get("last_orig_message_id") or payload.get("after_id")
+        after_ts = cp.get("last_orig_timestamp") or payload.get("after_ts")
+
+        if after_id:
+            data["after_id"] = str(after_id)
+        if after_ts and not data.get("after_iso"):
+            data["after_iso"] = str(after_ts)
+
     res = await _ws_cmd(CLIENT_AGENT_URL, {"type": "clone_messages", "data": data})
+
     if not res.get("ok", True):
         await locks.release(channel_id)
         return JSONResponse(
@@ -1685,15 +1763,6 @@ async def api_backfill_start(payload: dict = Body(...)):
         )
 
     return JSONResponse({"ok": True})
-
-
-@app.get("/api/backfills/inflight")
-async def api_backfills_inflight():
-
-    res = await _ws_cmd(SERVER_AGENT_URL, {"type": "backfills_status_query"})
-
-    items = (res or {}).get("data", {}).get("items", {})
-    return JSONResponse({"ok": True, "items": items})
 
 
 @app.get("/guilds")

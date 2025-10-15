@@ -60,6 +60,9 @@ class BackfillManager:
                 ),
                 "clone_channel_id": st.get("clone_channel_id"),
                 "in_flight": inflight,
+                "run_id": st.get("run_id"),
+                "last_orig_message_id": st.get("last_orig_id"),
+                "last_orig_timestamp": st.get("last_ts"),
             }
 
         return out
@@ -104,37 +107,87 @@ class BackfillManager:
             if meta.get("clone_channel_id") is not None:
                 st["clone_channel_id"] = int(meta["clone_channel_id"])
 
+        is_resume = bool((meta or {}).get("resume"))
+        reused = False
+
+        if not is_resume:
+            try:
+
+                self.r.db.backfill_abort_running_for_channel(
+                    cid, reason="user-declined-resume"
+                )
+            except Exception:
+                logger.exception(
+                    "[bf] failed to abort previous running run for #%s", cid
+                )
+
+        if is_resume:
+            try:
+                row = self.r.db.backfill_get_incomplete_for_channel(cid)
+                if row and row.get("run_id"):
+                    st["run_id"] = row["run_id"]
+                    st["delivered"] = int(row.get("delivered") or 0)
+                    st["expected_total"] = (
+                        int(row["expected_total"])
+                        if row.get("expected_total") is not None
+                        else None
+                    )
+                    st["last_orig_id"] = row.get("last_orig_message_id") or None
+                    st["last_ts"] = row.get("last_orig_timestamp") or None
+                    # Seed clone id from DB if meta didn't provide it
+                    if st.get("clone_channel_id") is None and row.get(
+                        "clone_channel_id"
+                    ):
+                        st["clone_channel_id"] = int(row["clone_channel_id"])
+                    reused = True
+            except Exception:
+                logger.exception("[bf] failed to reuse existing run for #%s", cid)
+
         if st.get("clone_channel_id") is None:
             row = self.r.chan_map.get(cid) or {}
             clone = row.get("cloned_channel_id") or row.get("clone_channel_id")
             if clone:
                 st["clone_channel_id"] = int(clone)
 
+        if not reused:
+            try:
+                m = st.get("meta") or {}
+                rng = (m.get("range") or {}) if isinstance(m.get("range"), dict) else {}
+                st["run_id"] = self.r.db.backfill_create_run(
+                    cid,
+                    rng or {},
+                )
+            except Exception:
+                logger.exception("[bf] failed to create backfill run for #%s", cid)
+
+        clone_id = st.get("clone_channel_id")
+        run_id = st.get("run_id")
+        if run_id and clone_id is not None:
+            with contextlib.suppress(Exception):
+                self.r.db.backfill_set_clone(run_id, int(clone_id))
+
         loop = asyncio.get_event_loop()
         st["started_at"] = loop.time()
         st["started_dt"] = datetime.now(timezone.utc)
-        st["last_count"] = 0
-        st["delivered"] = 0
+        st.setdefault("last_count", 0)
+        st.setdefault("delivered", 0)
+        st.setdefault("expected_total", None)
         st["last_edit_ts"] = 0.0
-        st["expected_total"] = None
-        st["temp_webhook_ids"] = []
-        st["temp_webhook_urls"] = []
-        st["temp_created_ids"] = []
+        st.setdefault("temp_webhook_ids", [])
+        st.setdefault("temp_webhook_urls", [])
+        st.setdefault("temp_created_ids", [])
 
         self._inflight[cid] = 0
         for t in list(self._attached.get(cid, ())):
             self._attached[cid].discard(t)
 
-        clone_id = st.get("clone_channel_id")
         if clone_id is not None:
             clone_id = int(clone_id)
             self._by_clone[clone_id] = cid
-
             self.semaphores.setdefault(clone_id, asyncio.Semaphore(1))
             self._rot_locks.setdefault(clone_id, asyncio.Lock())
             self._temp_locks.setdefault(clone_id, asyncio.Lock())
             self._temp_ready.pop(clone_id, None)
-
             self.invalidate_rotation(clone_id)
             await self.ensure_temps_ready(clone_id)
 
@@ -166,6 +219,13 @@ class BackfillManager:
             "temp_webhook_ids": [],
             "temp_webhook_urls": [],
         }
+
+        orig = int(channel_id)
+        st = self._progress.get(orig) or {}
+        run_id = st.get("run_id")
+        if run_id and clone_channel_id:
+            with contextlib.suppress(Exception):
+                self.r.db.backfill_set_clone(run_id, int(clone_channel_id))
         if clone_channel_id:
             self._by_clone[int(clone_channel_id)] = int(channel_id)
 
@@ -202,13 +262,39 @@ class BackfillManager:
                 except Exception:
                     pass
 
-    def note_sent(self, channel_id: int) -> None:
-        """Increment server-side delivered count for a backfill message."""
-        cid = int(channel_id)
-        st = self._progress.get(cid)
+    def note_sent(
+        self, channel_id: int, original_message_id: int | None = None
+    ) -> None:
+        st = self._progress.get(int(channel_id))
         if not st:
             return
+        sent_ids = st.setdefault("sent_ids", set())
+        if original_message_id:
+            oid = str(original_message_id)
+            if oid in sent_ids:
+                return
+            sent_ids.add(oid)
+            st["last_orig_id"] = oid
         st["delivered"] = int(st.get("delivered", 0)) + 1
+
+    def note_checkpoint(
+        self, channel_id, original_message_id=None, original_timestamp_iso=None
+    ):
+        st = self._progress.get(int(channel_id))
+        if not st:
+            return
+        if original_message_id is not None:
+            st["last_orig_id"] = str(original_message_id)
+        if original_timestamp_iso:
+            st["last_ts"] = str(original_timestamp_iso)
+        if run_id := st.get("run_id"):
+            self.r.db.backfill_update_checkpoint(
+                run_id,
+                delivered=int(st.get("delivered", 0)),
+                expected_total=st.get("expected_total"),
+                last_orig_message_id=st.get("last_orig_id"),
+                last_orig_timestamp=st.get("last_ts"),
+            )
 
     def update_expected_total(self, channel_id: int, total: int) -> None:
         """Set/raise expected total (from client precount)."""
@@ -218,6 +304,12 @@ class BackfillManager:
             return
         prev = int(st.get("expected_total") or 0)
         st["expected_total"] = max(prev, int(total))
+        run_id = (st or {}).get("run_id")
+        if run_id:
+            with contextlib.suppress(Exception):
+                self.r.db.backfill_update_checkpoint(
+                    run_id, expected_total=st["expected_total"]
+                )
         logger.debug(
             "[bf] set expected_total | channel=%s total=%s (prev=%s)",
             cid,
@@ -276,6 +368,12 @@ class BackfillManager:
                 await self.tracker.publish_progress(
                     str(cid), delivered=delivered, total=total
                 )
+
+        run_id = (self._progress.get(cid) or {}).get("run_id")
+        if run_id:
+            with contextlib.suppress(Exception):
+                self.r.db.backfill_mark_done(run_id)
+
         try:
             await self.r.bus.publish(
                 "client",
@@ -379,8 +477,19 @@ class BackfillManager:
             task.result()
         except asyncio.CancelledError:
             logger.debug("[bf] task for #%s cancelled", cid)
+            if not getattr(self.r, "_shutting_down", False):
+                st = self._progress.get(int(cid)) or {}
+                run_id = st.get("run_id")
+                if run_id:
+                    with contextlib.suppress(Exception):
+                        self.r.db.backfill_mark_aborted(run_id, "cancelled-by-server")
         except Exception as e:
             logger.exception("[bf] task error for #%s: %s", cid, e)
+            st = self._progress.get(int(cid)) or {}
+            run_id = st.get("run_id")
+            if run_id:
+                with contextlib.suppress(Exception):
+                    self.r.db.backfill_mark_failed(run_id, str(e))
         finally:
             n = self._inflight.get(cid, 0)
             self._inflight[cid] = max(0, n - 1)
@@ -777,7 +886,6 @@ class BackfillManager:
                         e,
                     )
 
-            # clear temp fields so we don't try again
             st["temp_created_ids"] = []
             st["temp_webhook_ids"] = []
             st["temp_webhook_urls"] = []
@@ -856,7 +964,6 @@ class BackfillManager:
 
                 ch = self.bot.get_channel(int(clone_id))
                 if not ch:
-                    # Fetch can raise when the channel doesn't exist or is in another guild / no perms
                     try:
                         ch = await self.bot.fetch_channel(int(clone_id))
                     except Exception as e:

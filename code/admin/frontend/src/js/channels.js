@@ -61,6 +61,7 @@
   let menuContext = null;
   let catPinByOrig = new Map();
   let catOrigByEither = new Map();
+  let inflightReady = false;
 
   (function () {
     if (window.__toastInit) return;
@@ -90,6 +91,32 @@
       "#ch-sortdir",
       "#ch-filter",
     ],
+  
+    require: "both",
+
+    onDown() {
+      try {
+        resetAllCloningUI();
+      } catch {}
+      inflightReady = false;
+      document
+        .querySelectorAll(".ch-card .ch-status, .ch-card .ch-progress")
+        .forEach((el) => el.remove());
+      document
+        .querySelectorAll(".ch-card.is-cloning, .ch-card.is-pending")
+        .forEach((card) => {
+          card.classList.remove("is-cloning", "is-pending");
+          card.removeAttribute("aria-busy");
+        });
+    },
+
+    onUp() {
+      try {
+        fetchAndApplyInflight().finally(() => {
+          inflightReady = true;
+        });
+      } catch {}
+    },
   });
   if (!gate.lastUpIsFresh()) gate.showGateSoon();
 
@@ -105,6 +132,14 @@
   let lastDeleteAt = 0;
   let menuAnchorBtn = null;
   let bfCleanup = null;
+
+  function shouldTrustBackfillPayload(p, cid) {
+    if (p?.task_id && taskMap.has(String(p.task_id))) return true;
+    if (startedHere.has(String(cid))) return true;
+
+    if (inflightReady && inflightByOrig.has(String(cid))) return true;
+    return false;
+  }
 
   function setCardInteractive(card, on) {
     if (!card) return;
@@ -646,7 +681,7 @@
       <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="customize-cat-title" tabindex="-1">
         <div class="modal-header">
           <h3 id="customize-cat-title">Customize category</h3>
-          <button id="customize-cat-close" class="icon-btn verify-close" aria-label="Close">×</button>
+          <button id="customize-cat-close" type="button" class="icon-btn verify-close" aria-label="Close">✕</button>
         </div>
         <div class="modal-body">
           <label for="customize-cat-name" class="label has-tip">
@@ -659,7 +694,7 @@
           <input id="customize-cat-name" class="input" type="text" placeholder="Leave empty to use original name" />
         </div>
         <div class="btns">
-          <button id="customize-cat-save" class="btn btn-primary" type="button">Save</button>
+          <button id="customize-cat-save" class="btn btn-ghost" type="button">Save</button>
         </div>
       </div>
     `;
@@ -679,7 +714,7 @@
   <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="customize-title" tabindex="-1">
     <div class="modal-header">
       <h3 id="customize-title">Customize channel</h3>
-      <button id="customize-close" class="icon-btn verify-close" aria-label="Close">×</button>
+      <button id="customize-close" type="button" class="icon-btn verify-close" aria-label="Close">✕</button>
     </div>
     <div class="modal-body">
     <label for="customize-name" class="label has-tip">
@@ -692,11 +727,44 @@
       <input id="customize-name" class="input" type="text" placeholder="Leave empty to use original name" />
     </div>
     <div class="btns">
-      <button id="customize-save" class="btn primary" type="button">Save</button>
+      <button id="customize-save" class="btn btn-ghost" type="button">Save</button>
     </div>
   </div>
 `;
     document.body.appendChild(wrap);
+
+    (function wireInfoTips() {
+      if (window.__infoTipsWired) return;
+      window.__infoTipsWired = true;
+    
+      function hideAllTips() {
+        document.querySelectorAll('.tip-bubble[aria-hidden="false"]')
+          .forEach(el => el.setAttribute('aria-hidden', 'true'));
+      }
+    
+      document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.info-dot');
+        if (btn) {
+          e.preventDefault();
+          const id = btn.getAttribute('aria-describedby');
+          const tip = id ? document.getElementById(id) : null;
+          if (!tip) return;
+    
+          const isOpen = tip.getAttribute('aria-hidden') === 'false';
+          // Close other open tips first
+          hideAllTips();
+          tip.setAttribute('aria-hidden', isOpen ? 'true' : 'false');
+          return;
+        }
+    
+        // Clicked outside any labeled tip area? Close.
+        if (!e.target.closest('.has-tip')) hideAllTips();
+      });
+    
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideAllTips();
+      });
+    })();
 
     if (!document.getElementById("customize-compact-styles")) {
       (function injectProgressStyles() {
@@ -839,7 +907,6 @@
       return name.replace(/^#\s*/, "").trim();
     }
 
-    // 2) Fallback to whatever's currently rendered
     try {
       const sel = `.ch-card[data-cid="${
         window.CSS && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"')
@@ -996,8 +1063,11 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stopInflightPolling();
     else {
-      fetchAndApplyInflight();
-      startInflightPolling();
+      inflightReady = false;
+      fetchAndApplyInflight().finally(() => {
+        inflightReady = true;
+        startInflightPolling();
+      });
     }
   });
 
@@ -1723,6 +1793,10 @@
               String(originalId)
             )})</span>.`,
             okText: "Add to blacklist",
+            cancelText: "Cancel",
+
+            btnClassOk: "btn btn-ghost-red",
+            btnClassCancel: "btn btn-ghost",
           },
           async () => {
             try {
@@ -1741,6 +1815,7 @@
               window.showToast("Channel added to blacklist.", {
                 type: "success",
               });
+              await load();
             } catch {
               window.showToast("Failed to add to blacklist.", {
                 type: "error",
@@ -1835,6 +1910,8 @@
               String(originalCatId)
             )})</span>.`,
             okText: "Add to blacklist",
+            btnClassOk: "btn btn-ghost-red",
+            btnClassCancel: "btn btn-ghost",
           },
           async () => {
             try {
@@ -2234,6 +2311,7 @@
           catName
         )}</b> <span class="muted">(${escapeHtml(catId)})</span>.`,
         okText: "Delete",
+        btnClassOk: "btn btn-ghost-red",
       },
       () => {
         markPending(catId);
@@ -2294,7 +2372,6 @@
         return;
       }
 
-      // verify it's actually an orphan channel
       const selId = String(ctx.id);
       const card = document.querySelector(
         `.ch-card[data-cid="${
@@ -2325,6 +2402,7 @@
             chName
           )}</b> <span class="muted">(${escapeHtml(selId)})</span>.`,
           okText: "Delete",
+          btnClassOk: "btn btn-ghost-red",
         },
         () => {
           markPending(selId);
@@ -2358,11 +2436,11 @@
             catName
           )}</b> <span class="muted">(${escapeHtml(catId)})</span>.`,
           okText: "Delete",
+          btnClassOk: "btn btn-ghost-red",
         },
         () => {
           markPending(catId);
           sessionStorage.removeItem(LAST_DELETED_SIG_KEY);
-
           sendVerify({ action: "delete_one", kind: "category", id: catId });
         }
       );
@@ -2372,8 +2450,8 @@
 
   if (!gate.lastUpIsFresh()) resetAllCloningUI();
 
-  // Kick off the gate polling; when ready we'll finish boot.
   gate.checkAndGate(() => afterGateReady());
+  gate.startWatch?.();
 
   let bootedAfterGate = false;
   async function afterGateReady() {
@@ -2408,6 +2486,7 @@
           chCount === 1 ? "channel" : "channels"
         } that are <em>not part of the original structure</em>.`,
         okText: "Delete all",
+        btnClassOk: "btn btn-ghost-red",
       },
       () => {
         ids.forEach((id) => markPending(id));
@@ -2439,8 +2518,9 @@
           catCount === 1 ? "category" : "categories"
         } and <b>${chCount}</b> orphan ${
           chCount === 1 ? "channel" : "channels"
-        } that are <em>not part of the clone</em>.`,
+        } that are <em>not part of the original structure</em>.`,
         okText: "Delete all",
+        btnClassOk: "btn btn-ghost-red",
       },
       () => {
         ids.forEach((id) => markPending(id));
@@ -2497,8 +2577,49 @@
   const cClose = document.getElementById("confirm-close");
   const cBackdrop = cModal?.querySelector(".modal-backdrop");
 
+  function sanitizeHtml(html) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = String(html);
+
+    tpl.content.querySelectorAll("script,style").forEach((n) => n.remove());
+
+    tpl.content.querySelectorAll("*").forEach((el) => {
+      [...el.attributes].forEach((attr) => {
+        const n = attr.name.toLowerCase();
+        if (n.startsWith("on")) el.removeAttribute(attr.name);
+        if ((n === "href" || n === "src") && /^javascript:/i.test(attr.value)) {
+          el.removeAttribute(attr.name);
+        }
+      });
+    });
+
+    return tpl.innerHTML;
+  }
+
+  /**
+   * openConfirm(options, onConfirm)
+   *
+   * New/optional options:
+   * - html: string  → insert as HTML (sanitized by default)
+   * - bodyNode: Node → insert DOM node
+   * - dangerouslyAllowHtml: boolean → skip sanitizeHtml if true
+   * - bodyIsText: boolean → force treat `body` as plain text
+   */
   function openConfirm(
-    { title = "Confirm", body = "Are you sure?", okText = "Delete" },
+    {
+      title = "Confirm",
+      body = "Are you sure?",
+      html = null,
+      bodyNode = null,
+      dangerouslyAllowHtml = false,
+      bodyIsText = false,
+      okText = "Delete",
+      cancelText = "Cancel",
+      onCancel = null,
+
+      btnClassOk = null,
+      btnClassCancel = null,
+    },
     onConfirm
   ) {
     if (!cModal) {
@@ -2507,11 +2628,34 @@
     }
 
     cTitle.textContent = title;
-    cBody.innerHTML = body;
+
+    if (bodyNode instanceof Node) {
+      cBody.replaceChildren(bodyNode);
+    } else if (typeof html === "string") {
+      cBody.innerHTML = dangerouslyAllowHtml ? html : sanitizeHtml(html);
+    } else if (bodyIsText) {
+      cBody.textContent = String(body ?? "");
+    } else {
+      const s = String(body ?? "");
+      cBody.innerHTML = dangerouslyAllowHtml ? s : sanitizeHtml(s);
+    }
+
     cOk.textContent = okText;
+    if (cCancel) cCancel.textContent = cancelText || "Cancel";
+
+    cOk.className = "btn btn-ghost";
+    if (cCancel) cCancel.className = "btn btn-ghost";
+
+    if (btnClassOk) cOk.className = btnClassOk;
+    if (btnClassCancel && cCancel) cCancel.className = btnClassCancel;
+
+    const isResume = !!cBody.querySelector(".resume-modal");
+    if (isResume && !btnClassOk && !btnClassCancel) {
+      cOk.className = "btn btn-ghost";
+      if (cCancel) cCancel.className = "btn btn-ghost-red";
+    }
 
     lastFocusConfirm = document.activeElement;
-
     setInert(cModal, false);
     cModal.removeAttribute("aria-hidden");
     cModal.classList.add("show");
@@ -2519,11 +2663,9 @@
 
     const close = () => {
       blurIfInside(cModal);
-
       setInert(cModal, true);
       cModal.setAttribute("aria-hidden", "true");
       cModal.classList.remove("show");
-
       if (lastFocusConfirm && typeof lastFocusConfirm.focus === "function") {
         try {
           lastFocusConfirm.focus();
@@ -2533,8 +2675,18 @@
     };
 
     const onOk = () => {
-      onConfirm?.();
-      close();
+      try {
+        onConfirm?.();
+      } finally {
+        close();
+      }
+    };
+    const onCancelClick = () => {
+      try {
+        onCancel?.();
+      } finally {
+        close();
+      }
     };
     const onEsc = (e) => {
       if (e.key === "Escape") close();
@@ -2545,14 +2697,14 @@
 
     function teardown() {
       cOk.removeEventListener("click", onOk);
-      cCancel?.removeEventListener("click", close);
+      cCancel?.removeEventListener("click", onCancelClick);
       cClose?.removeEventListener("click", close);
       cBackdrop?.removeEventListener("click", onBackdrop);
       document.removeEventListener("keydown", onEsc);
     }
 
     cOk.addEventListener("click", onOk, { once: true });
-    cCancel?.addEventListener("click", close, { once: true });
+    cCancel?.addEventListener("click", onCancelClick, { once: true });
     cClose?.addEventListener("click", close, { once: true });
     cBackdrop?.addEventListener("click", onBackdrop);
     document.addEventListener("keydown", onEsc);
@@ -2640,12 +2792,15 @@
 
     sock.onopen = () => {
       dbg("WS OUT connected");
-      fetchAndApplyInflight();
+      inflightReady = false;
+      fetchAndApplyInflight().finally(() => {
+        inflightReady = true;
+      });
     };
 
     sock.onclose = () => {
       dbg("WS OUT closed");
-      window.showToast("Connection hiccup — restoring status…", {
+      window.showToast("Connection lost…", {
         type: "warning",
       });
     };
@@ -2731,6 +2886,7 @@
             let cid = backfillIdFrom(p.data) || backfillIdFrom(p);
             cid = toOriginalCid(cid);
             if (!cid) return;
+            if (!shouldTrustBackfillPayload(p, cid)) return;
 
             if (p.task_id && cid) rememberTask(p.task_id, cid);
 
@@ -2759,6 +2915,7 @@
             let cid = backfillIdFrom(p.data) || backfillIdFrom(p);
             cid = toOriginalCid(cid);
             if (!cid) return;
+            if (!shouldTrustBackfillPayload(p, cid)) return;
 
             const haveDelivered = Number.isFinite(delivered) && delivered > 0;
             const haveTotal = Number.isFinite(total) && total > 0;
@@ -2817,6 +2974,7 @@
             if (!cid && p.task_id) cid = taskMap.get(String(p.task_id));
             cid = toOriginalCid(cid);
             if (!cid) return;
+            if (!shouldTrustBackfillPayload(p, cid)) return;
             if (p.task_id) forgetTask(p.task_id);
             finalizeBackfillUI(cid, { announce: true });
             return;
@@ -3080,16 +3238,25 @@
       pill.querySelector(".kill").onclick = () => {
         openConfirm(
           {
-            title: "Delete orphan channel?",
-            body: `This will delete <b>${escapeHtml(
-              ch.name
-            )}</b> <span class="muted">(${escapeHtml(ch.id)})</span>.`,
-            okText: "Delete",
+            title: "Delete all orphans?",
+            body: `This will delete <b>${catCount}</b> orphan ${
+              catCount === 1 ? "category" : "categories"
+            } and <b>${chCount}</b> orphan ${
+              chCount === 1 ? "channel" : "channels"
+            } that are <em>not part of the clone</em>.`,
+            okText: "Delete all",
+            btnClassOk: "btn btn-ghost-red",
           },
           () => {
-            markPending(ch.id);
+            ids.forEach((id) => markPending(id));
             sessionStorage.removeItem(LAST_DELETED_SIG_KEY);
-            sendVerify({ action: "delete_one", kind: "channel", id: ch.id });
+            bulkDeleteInFlight = true;
+            showBusyOverlay(
+              `Deleting ${catCount} categor${
+                catCount === 1 ? "y" : "ies"
+              } & ${chCount} channel${chCount === 1 ? "" : "s"}…`
+            );
+            sendVerify({ action: "delete_all", ids });
           }
         );
       };
@@ -3471,6 +3638,159 @@
     bfChannelId = null;
   }
 
+  async function checkResumeAndPrompt(originalId) {
+    const cid = String(toOriginalCid(originalId));
+
+    const fmt = (s) => (s ? new Date(s).toLocaleString() : "—");
+    const esc = (s) =>
+      String(s ?? "").replace(
+        /[&<>"']/g,
+        (c) =>
+          ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c])
+      );
+
+    try {
+      const res = await fetch(
+        `/api/backfills/resume-info?channel_id=${encodeURIComponent(cid)}`,
+        { credentials: "same-origin", cache: "no-store" }
+      );
+      const json = await res.json().catch(() => ({}));
+      const info = json?.resume ?? json?.data ?? null;
+
+      const canResume = !!(info?.available ?? info?.resumable);
+      if (!canResume) {
+        const row = findRowByAnyChannelId(cid);
+        if (row) openBackfillDialog(row.original_channel_id);
+        return;
+      }
+
+      const runId = info?.run_id || "—";
+      const delivered = Number.isFinite(info?.delivered)
+        ? info.delivered
+        : null;
+      const total = Number.isFinite(info?.expected_total)
+        ? info.expected_total
+        : null;
+      const startedAtISO =
+        info?.started_at || info?.started_dt || info?.startedAt || null;
+      const updatedAtISO =
+        info?.updated_at || info?.checkpoint?.last_orig_timestamp || null;
+
+      const sentTxt = delivered != null ? delivered.toLocaleString() : "—";
+      const totalTxt = total != null ? total.toLocaleString() : "—";
+
+      const bodyHtml = `
+        <div class="resume-modal">
+          <p class="mb">A previous backfill for this channel was not finished.</p>
+  
+          <dl class="kv">
+            <dt>Backfill ID:</dt>
+            <dd><code class="inline-code" title="${esc(runId)}">${esc(
+        runId
+      )}</code></dd>
+  
+            <dt>Started At:</dt>
+            <dd><code class="inline-code" title="${esc(
+              fmt(startedAtISO)
+            )}">${esc(fmt(startedAtISO))}</code></dd>
+  
+            <dt>Last Updated:</dt>
+            <dd><code class="inline-code" title="${esc(
+              fmt(updatedAtISO)
+            )}">${esc(fmt(updatedAtISO))}</code></dd>
+  
+            <dt>Messages Sent:</dt>
+            <dd>
+              <code class="inline-code" title="${esc(sentTxt)}">${esc(
+        sentTxt
+      )}</code>
+              /
+              <code class="inline-code" title="${esc(totalTxt)}">${esc(
+        totalTxt
+      )}</code>
+            </dd>
+          </dl>
+        </div>
+      `;
+
+      openConfirm(
+        {
+          title: "Resume previous backfill?",
+          html: bodyHtml,
+          okText: "Continue",
+          cancelText: "Start Over",
+          btnClassOk: "btn btn-ghost",
+          btnClassCancel: "btn btn-ghost-red",
+          onCancel: () => {
+            const row = findRowByAnyChannelId(cid);
+            if (row) openBackfillDialog(row.original_channel_id);
+          },
+        },
+        async () => {
+          setCloneLaunching(cid, true);
+          setCardLoading(cid, true, "Resuming…");
+          try {
+            const resp = await fetch("/api/backfill/start", {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                channel_id: cid,
+                resume: true,
+                run_id: info?.run_id ?? undefined,
+                checkpoint: info?.checkpoint ?? null,
+              }),
+            });
+
+            const j = await resp.json().catch(() => ({}));
+
+            if (!resp.ok || j?.ok === false) {
+              toastOncePersist(
+                `bf:resume:error:${cid}`,
+                j?.error || `Couldn't resume (HTTP ${resp.status}).`,
+                { type: "error" },
+                15000
+              );
+              throw new Error(j?.error || `HTTP ${resp.status}`);
+            }
+          } catch (e) {
+            console.error("Resume backfill failed:", e);
+            setCloneLaunching(cid, false);
+            setCardLoading(cid, false);
+
+            toastOncePersist(
+              `bf:resume:error:${cid}`,
+              "Couldn't resume the clone. You can start a new backfill.",
+              { type: "error" },
+              15000
+            );
+
+            const row = findRowByAnyChannelId(cid);
+            if (row) openBackfillDialog(row.original_channel_id);
+          }
+        }
+      );
+    } catch (e) {
+      console.error("resume-info fetch failed:", e);
+
+      toastOncePersist(
+        `bf:resume-info:error:${cid}`,
+        "Couldn’t check resume status. You can start a new backfill.",
+        { type: "warning" },
+        12000
+      );
+
+      const row = findRowByAnyChannelId(cid);
+      if (row) openBackfillDialog(row.original_channel_id);
+    }
+  }
+
   document.getElementById("ch-menu")?.addEventListener("click", (ev) => {
     const li = ev.target.closest("[data-action]");
     if (!li) return;
@@ -3491,7 +3811,7 @@
         return;
       }
       hideMenu({ restoreFocus: false });
-      openBackfillDialog(id);
+      checkResumeAndPrompt(id);
     }
   });
 
