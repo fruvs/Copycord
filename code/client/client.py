@@ -218,7 +218,9 @@ class ClientListener:
                 or data.get("until")
             )
 
-            _n = data.get("last_n") or (rng.get("value") if mode in ("last", "last_n") else None)
+            _n = data.get("last_n") or (
+                rng.get("value") if mode in ("last", "last_n") else None
+            )
             try:
                 last_n = int(_n) if _n is not None else None
             except Exception:
@@ -586,6 +588,54 @@ class ClientListener:
 
             asyncio.create_task(self.runner.run(d, guild, acquired=True))
             return {"ok": True, "accepted": True}
+
+        elif typ == "pull_assets":
+            import logging
+
+            try:
+                from export_runners import AssetExportRunner
+            except Exception:
+                from .export_runners import AssetExportRunner  # type: ignore
+
+            try:
+                req_gid_val = (data or {}).get("guild_id")
+                req_gid = int(req_gid_val) if req_gid_val is not None else 0
+            except Exception:
+                req_gid = 0
+
+            try:
+                host_gid = (
+                    int(self.host_guild_id)
+                    if getattr(self, "host_guild_id", None)
+                    else 0
+                )
+            except Exception:
+                host_gid = 0
+
+            gid = req_gid or host_gid
+            if not gid:
+                return {"ok": False, "reason": "no-host-guild"}
+
+            guild = self.bot.get_guild(int(gid))
+            if guild is None:
+                return {"ok": False, "reason": f"not-in-guild:{gid}"}
+
+            sel = str(((data or {}).get("asset") or "both")).lower()
+            include_emojis = sel in ("emojis", "both")
+            include_stickers = sel in ("stickers", "both")
+
+            runner = AssetExportRunner(
+                self.bot,
+                self.ws,
+                logger=(
+                    getattr(self, "logger", None) or logging.getLogger("asset_export")
+                ),
+            )
+            res = await runner.run(
+                guild, include_emojis=include_emojis, include_stickers=include_stickers
+            )
+
+            return {"ok": True, **res}
 
         return None
 
