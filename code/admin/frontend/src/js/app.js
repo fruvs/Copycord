@@ -28,7 +28,10 @@
     const active = PROFILE_STATE.activeId;
     const current = PROFILE_STATE.list.find((p) => p.id === currentProfileId);
     if (!isSaved) {
+      profileStatus.textContent =
+        "Unsaved profile — fill in the form and choose Save to add it.";
       profileStatus.textContent = "Unsaved profile";
+
     } else if (current && current.id === active) {
       profileStatus.textContent = "Active profile";
     } else {
@@ -49,7 +52,10 @@
     placeholder.value = "";
     placeholder.textContent = PROFILE_STATE.list.length
       ? "Select a profile"
+      : "Add a profile to begin";
+
       : "No profiles";
+
     placeholder.disabled = true;
     placeholder.hidden = false;
     profileSelect.appendChild(placeholder);

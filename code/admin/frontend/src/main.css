@@ -177,6 +177,11 @@ th {
 .profile-controls .field {
   margin: 0;
 }
+.profile-controls .profile-help {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
 .profile-row {
   display: flex;
   flex-wrap: wrap;
