@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 import time
 from datetime import datetime, timezone
+from common.constants import PROFILE_BOOL_KEYS
 from common.db import DBManager
 
 # ------------------- Defaults & wiring -------------------
@@ -49,11 +50,14 @@ class ControlService:
         "COMMAND_USERS",
         "DELETE_CHANNELS",
         "DELETE_THREADS",
+        "DELETE_MESSAGES",
+        "EDIT_MESSAGES",
         "DELETE_ROLES",
         "CLONE_EMOJI",
         "CLONE_STICKER",
         "CLONE_ROLES",
         "MIRROR_ROLE_PERMISSIONS",
+        "MIRROR_CHANNEL_PERMISSIONS",
         "CLIENT_TOKEN",
         "HOST_GUILD_ID",
         "ENABLE_CLONING",
@@ -108,6 +112,25 @@ class ControlService:
         for k, v in (all_cfg or {}).items():
             if k in self.ALLOWED_ENV and v is not None:
                 env[k] = str(v)
+
+        try:
+            active = self._db.get_active_profile()
+        except Exception:
+            active = None
+        if active:
+            env.update(
+                {
+                    "SERVER_TOKEN": active.get("server_token", ""),
+                    "CLIENT_TOKEN": active.get("client_token", ""),
+                    "CLONE_GUILD_ID": active.get("clone_guild_id", ""),
+                    "HOST_GUILD_ID": active.get("host_guild_id", ""),
+                    "COMMAND_USERS": active.get("command_users", ""),
+                }
+            )
+            settings = active.get("settings", {})
+            for key in PROFILE_BOOL_KEYS:
+                if key in self.ALLOWED_ENV:
+                    env[key] = "True" if settings.get(key) else "False"
         return env
 
     # ----------------- Child process control -----------------

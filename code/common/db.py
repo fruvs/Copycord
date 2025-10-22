@@ -13,6 +13,8 @@ import sqlite3, threading
 from typing import List, Optional
 import uuid
 
+from common.constants import PROFILE_BOOL_KEYS, PROFILE_TEXT_KEYS
+
 
 class DBManager:
     def __init__(self, db_path: str):
@@ -192,6 +194,25 @@ class DBManager:
         c.execute(
             "INSERT OR IGNORE INTO settings (id, blocked_keywords, version, notified_version) VALUES (1, '', '', '')"
         )
+
+        c.execute(
+            """
+        CREATE TABLE IF NOT EXISTS mirror_profiles (
+          id              TEXT PRIMARY KEY,
+          name            TEXT    NOT NULL,
+          server_token    TEXT    NOT NULL,
+          client_token    TEXT    NOT NULL,
+          host_guild_id   TEXT    NOT NULL DEFAULT '',
+          clone_guild_id  TEXT    NOT NULL,
+          command_users   TEXT    NOT NULL DEFAULT '',
+          settings_json   TEXT    NOT NULL DEFAULT '{}',
+          created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        )
+
+        self._ensure_default_profile()
 
         self._ensure_table(
             name="announcement_subscriptions",
@@ -452,6 +473,241 @@ class DBManager:
         finally:
             # Restore FK pragma to its previous value
             self.conn.execute(f"PRAGMA foreign_keys = {1 if prev_fk else 0};")
+
+    # ------------------------------------------------------------------
+    # Mirror profile helpers
+    # ------------------------------------------------------------------
+    def _ensure_default_profile(self) -> None:
+        """Create a mirror profile from legacy config if none exist."""
+        try:
+            row = self.conn.execute(
+                "SELECT COUNT(1) AS count FROM mirror_profiles"
+            ).fetchone()
+            if row and int(row["count"]) > 0:
+                return
+
+            legacy = self.get_all_config()
+            server_token = (legacy.get("SERVER_TOKEN") or "").strip()
+            client_token = (legacy.get("CLIENT_TOKEN") or "").strip()
+            clone_id = (legacy.get("CLONE_GUILD_ID") or "").strip()
+
+            if not (server_token and client_token and clone_id):
+                return
+
+            name = legacy.get("PROFILE_NAME") or "Default profile"
+            host_id = (legacy.get("HOST_GUILD_ID") or "").strip()
+            cmd_users = (legacy.get("COMMAND_USERS") or "").strip()
+
+            settings = {}
+            for key in PROFILE_BOOL_KEYS:
+                settings[key] = self._coerce_bool(legacy.get(key, "False"))
+
+            profile = {
+                "id": uuid.uuid4().hex,
+                "name": name,
+                "server_token": server_token,
+                "client_token": client_token,
+                "host_guild_id": host_id,
+                "clone_guild_id": clone_id,
+                "command_users": cmd_users,
+                "settings": settings,
+            }
+
+            self._insert_profile(profile)
+            self.set_active_profile(profile["id"], sync=False)
+            self._sync_profile_into_app_config(profile)
+        except Exception:
+            pass
+
+    def _coerce_bool(self, value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _profile_settings_from_json(self, raw: str) -> dict:
+        try:
+            parsed = json.loads(raw or "{}")
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            parsed = {}
+
+        return {key: self._coerce_bool(parsed.get(key)) for key in PROFILE_BOOL_KEYS}
+
+    def _profile_row_to_dict(self, row: sqlite3.Row | None) -> Optional[dict]:
+        if not row:
+            return None
+        settings = self._profile_settings_from_json(row["settings_json"])
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "server_token": row["server_token"],
+            "client_token": row["client_token"],
+            "host_guild_id": row["host_guild_id"] or "",
+            "clone_guild_id": row["clone_guild_id"],
+            "command_users": row["command_users"] or "",
+            "settings": settings,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _normalize_profile_payload(self, data: dict) -> dict:
+        payload = dict(data or {})
+        name = (payload.get("name") or "").strip() or "Untitled profile"
+        server_token = (payload.get("server_token") or "").strip()
+        client_token = (payload.get("client_token") or "").strip()
+        clone_id = (payload.get("clone_guild_id") or "").strip()
+        host_id = (payload.get("host_guild_id") or "").strip()
+        cmd_users = (payload.get("command_users") or "").strip()
+        settings_raw = payload.get("settings") or {}
+        if not isinstance(settings_raw, dict):
+            settings_raw = {}
+        settings = {key: self._coerce_bool(settings_raw.get(key)) for key in PROFILE_BOOL_KEYS}
+
+        return {
+            "id": payload.get("id") or uuid.uuid4().hex,
+            "name": name,
+            "server_token": server_token,
+            "client_token": client_token,
+            "clone_guild_id": clone_id,
+            "host_guild_id": host_id,
+            "command_users": cmd_users,
+            "settings": settings,
+        }
+
+    def _insert_profile(self, profile: dict) -> None:
+        settings_json = json.dumps(profile["settings"], separators=(",", ":"))
+        now = datetime.utcnow().isoformat()
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO mirror_profiles (
+                    id, name, server_token, client_token, host_guild_id,
+                    clone_guild_id, command_users, settings_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile["id"],
+                    profile["name"],
+                    profile["server_token"],
+                    profile["client_token"],
+                    profile["host_guild_id"],
+                    profile["clone_guild_id"],
+                    profile["command_users"],
+                    settings_json,
+                    now,
+                    now,
+                ),
+            )
+
+    def _update_profile_row(self, profile_id: str, profile: dict) -> None:
+        settings_json = json.dumps(profile["settings"], separators=(",", ":"))
+        now = datetime.utcnow().isoformat()
+        with self.lock, self.conn:
+            self.conn.execute(
+                """
+                UPDATE mirror_profiles
+                SET name=?, server_token=?, client_token=?, host_guild_id=?,
+                    clone_guild_id=?, command_users=?, settings_json=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    profile["name"],
+                    profile["server_token"],
+                    profile["client_token"],
+                    profile["host_guild_id"],
+                    profile["clone_guild_id"],
+                    profile["command_users"],
+                    settings_json,
+                    now,
+                    profile_id,
+                ),
+            )
+
+    def list_profiles(self) -> List[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM mirror_profiles ORDER BY created_at"
+        ).fetchall()
+        return [self._profile_row_to_dict(r) for r in rows]
+
+    def get_profile(self, profile_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM mirror_profiles WHERE id=?",
+            (profile_id,),
+        ).fetchone()
+        return self._profile_row_to_dict(row)
+
+    def create_profile(self, data: dict) -> dict:
+        profile = self._normalize_profile_payload(data)
+        self._insert_profile(profile)
+        return self.get_profile(profile["id"])
+
+    def update_profile(self, profile_id: str, data: dict) -> Optional[dict]:
+        existing = self.get_profile(profile_id)
+        if not existing:
+            return None
+        payload = self._normalize_profile_payload({"id": profile_id, **data})
+        self._update_profile_row(profile_id, payload)
+        return self.get_profile(profile_id)
+
+    def delete_profile(self, profile_id: str) -> bool:
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM mirror_profiles WHERE id=?",
+                (profile_id,),
+            )
+            deleted = cur.rowcount > 0
+        if deleted:
+            active = self.get_active_profile_id()
+            if active == profile_id:
+                self.set_config("ACTIVE_PROFILE_ID", "")
+        return deleted
+
+    def get_active_profile_id(self) -> str:
+        return self.get_config("ACTIVE_PROFILE_ID", "")
+
+    def get_active_profile(self) -> Optional[dict]:
+        pid = self.get_active_profile_id()
+        if pid:
+            prof = self.get_profile(pid)
+            if prof:
+                return prof
+        profiles = self.list_profiles()
+        if profiles:
+            self.set_active_profile(profiles[0]["id"], sync=True)
+            return profiles[0]
+        return None
+
+    def _sync_profile_into_app_config(self, profile: dict) -> None:
+        mapping = {
+            "SERVER_TOKEN": profile.get("server_token", ""),
+            "CLIENT_TOKEN": profile.get("client_token", ""),
+            "HOST_GUILD_ID": profile.get("host_guild_id", ""),
+            "CLONE_GUILD_ID": profile.get("clone_guild_id", ""),
+            "COMMAND_USERS": profile.get("command_users", ""),
+        }
+        for key, value in mapping.items():
+            self.set_config(key, value or "")
+
+        for key in PROFILE_BOOL_KEYS:
+            val = profile.get("settings", {}).get(key, False)
+            self.set_config(key, "True" if val else "False")
+
+    def set_active_profile(self, profile_id: str, sync: bool = True) -> dict:
+        profile = self.get_profile(profile_id)
+        if not profile:
+            raise ValueError("profile-not-found")
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT INTO app_config(key, value) VALUES('ACTIVE_PROFILE_ID', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (profile_id,),
+            )
+        if sync:
+            self._sync_profile_into_app_config(profile)
+        return profile
 
     def set_config(self, key: str, value: str) -> None:
         with self.lock, self.conn:

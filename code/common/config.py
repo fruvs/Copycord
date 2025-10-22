@@ -12,6 +12,8 @@ import os
 import logging
 from typing import Optional
 
+from common.constants import PROFILE_BOOL_KEYS, PROFILE_TEXT_KEYS
+
 from common.db import DBManager
 
 logger = logging.getLogger(__name__)

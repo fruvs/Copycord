@@ -57,6 +57,7 @@ from starlette.types import Scope, Receive, Send
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from common.config import CURRENT_VERSION
+from common.constants import PROFILE_BOOL_KEYS, PROFILE_TEXT_KEYS
 from common.db import DBManager
 from common.backup_scheduler import BackupConfig, DailySQLiteBackupScheduler
 from admin.web_config import router as links_router
@@ -185,19 +186,7 @@ ALLOWED_ENV = [
     "MIRROR_CHANNEL_PERMISSIONS",
 ]
 REQUIRED = ["SERVER_TOKEN", "CLIENT_TOKEN", "CLONE_GUILD_ID"]
-BOOL_KEYS = [
-    "DELETE_CHANNELS",
-    "DELETE_THREADS",
-    "DELETE_MESSAGES",
-    "EDIT_MESSAGES",
-    "DELETE_ROLES",
-    "CLONE_EMOJI",
-    "CLONE_STICKER",
-    "CLONE_ROLES",
-    "MIRROR_ROLE_PERMISSIONS",
-    "ENABLE_CLONING",
-    "MIRROR_CHANNEL_PERMISSIONS",
-]
+BOOL_KEYS = list(PROFILE_BOOL_KEYS)
 DEFAULTS: Dict[str, str] = {
     "DELETE_CHANNELS": "True",
     "DELETE_THREADS": "True",
@@ -1515,6 +1504,27 @@ def _write_env(values: Dict[str, str]) -> None:
         db.set_config(k, v)
     LOGGER.info("Config saved | %s", _redact_dict(values))
 
+    try:
+        active = db.get_active_profile()
+    except Exception:
+        active = None
+    if active:
+        settings_payload = {
+            key: _as_bool(values.get(key, active.get("settings", {}).get(key, False)))
+            for key in PROFILE_BOOL_KEYS
+        }
+        profile_payload = {
+            "name": active.get("name"),
+            "server_token": values.get("SERVER_TOKEN", active.get("server_token", "")),
+            "client_token": values.get("CLIENT_TOKEN", active.get("client_token", "")),
+            "host_guild_id": values.get("HOST_GUILD_ID", active.get("host_guild_id", "")),
+            "clone_guild_id": values.get("CLONE_GUILD_ID", active.get("clone_guild_id", "")),
+            "command_users": values.get("COMMAND_USERS", active.get("command_users", "")),
+            "settings": settings_payload,
+        }
+        db.update_profile(active.get("id"), profile_payload)
+        db.set_active_profile(active.get("id"))
+
 
 def _validate(values: Dict[str, str]) -> List[str]:
     errs: List[str] = []
@@ -1548,6 +1558,188 @@ def _validate(values: Dict[str, str]) -> List[str]:
 
 def _norm_bool_str(v: str) -> str:
     return "True" if str(v).strip().lower() in ("true", "1", "yes", "on") else "False"
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _serialize_profile(profile: dict, active_id: str) -> dict:
+    settings = {k: bool(profile.get("settings", {}).get(k, False)) for k in PROFILE_BOOL_KEYS}
+    return {
+        "id": profile.get("id"),
+        "name": profile.get("name") or "",
+        "server_token": profile.get("server_token") or "",
+        "client_token": profile.get("client_token") or "",
+        "host_guild_id": profile.get("host_guild_id") or "",
+        "clone_guild_id": profile.get("clone_guild_id") or "",
+        "command_users": profile.get("command_users") or "",
+        "settings": settings,
+        "created_at": profile.get("created_at"),
+        "updated_at": profile.get("updated_at"),
+        "is_active": profile.get("id") == active_id,
+    }
+
+
+def _profile_defaults() -> dict:
+    env = _read_env()
+    settings = {k: _as_bool(env.get(k, False)) for k in PROFILE_BOOL_KEYS}
+    return {
+        "name": "New profile",
+        "server_token": env.get("SERVER_TOKEN", ""),
+        "client_token": env.get("CLIENT_TOKEN", ""),
+        "host_guild_id": env.get("HOST_GUILD_ID", ""),
+        "clone_guild_id": env.get("CLONE_GUILD_ID", ""),
+        "command_users": env.get("COMMAND_USERS", ""),
+        "settings": settings,
+    }
+
+
+def _prepare_profile_payload(data: dict, existing: dict | None = None) -> dict:
+    existing = existing or {}
+    settings_existing = existing.get("settings", {})
+    settings_input = data.get("settings") or {}
+    if not isinstance(settings_input, dict):
+        settings_input = {}
+
+    settings = {}
+    for key in PROFILE_BOOL_KEYS:
+        if key in settings_input:
+            settings[key] = _as_bool(settings_input.get(key))
+        else:
+            settings[key] = bool(settings_existing.get(key, False))
+
+    return {
+        "name": (data.get("name") or existing.get("name") or "Untitled profile").strip(),
+        "server_token": (data.get("server_token") or existing.get("server_token") or "").strip(),
+        "client_token": (data.get("client_token") or existing.get("client_token") or "").strip(),
+        "host_guild_id": (data.get("host_guild_id") or existing.get("host_guild_id") or "").strip(),
+        "clone_guild_id": (data.get("clone_guild_id") or existing.get("clone_guild_id") or "").strip(),
+        "command_users": (data.get("command_users") or existing.get("command_users") or "").strip(),
+        "settings": settings,
+    }
+
+
+def _validate_profile_payload(data: dict, existing: dict | None = None) -> list[str]:
+    errs: list[str] = []
+    existing = existing or {}
+
+    name = (data.get("name") or existing.get("name") or "").strip()
+    if not name:
+        errs.append("Profile name is required")
+
+    server_token = (data.get("server_token") or existing.get("server_token") or "").strip()
+    client_token = (data.get("client_token") or existing.get("client_token") or "").strip()
+    clone_id = (data.get("clone_guild_id") or existing.get("clone_guild_id") or "").strip()
+    host_id = (data.get("host_guild_id") or existing.get("host_guild_id") or "").strip()
+
+    if not server_token:
+        errs.append("SERVER_TOKEN is required")
+    if not client_token:
+        errs.append("CLIENT_TOKEN is required")
+    if not clone_id:
+        errs.append("CLONE_GUILD_ID is required")
+    elif not clone_id.isdigit():
+        errs.append("CLONE_GUILD_ID must be a positive integer")
+
+    if host_id and not host_id.isdigit():
+        errs.append("HOST_GUILD_ID must be a positive integer")
+
+    return errs
+
+
+@app.get("/api/profiles", response_class=JSONResponse)
+async def api_profiles_list():
+    profiles = db.list_profiles()
+    active_id = db.get_active_profile_id()
+    serialized = [_serialize_profile(p, active_id) for p in profiles]
+    return {
+        "ok": True,
+        "profiles": serialized,
+        "active_profile_id": active_id,
+        "bool_keys": PROFILE_BOOL_KEYS,
+        "text_keys": PROFILE_TEXT_KEYS,
+        "defaults": _profile_defaults(),
+    }
+
+
+@app.post("/api/profiles", response_class=JSONResponse)
+async def api_profiles_create(payload: dict = Body(...)):
+    errs = _validate_profile_payload(payload)
+    if errs:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(errs))
+
+    profile_data = _prepare_profile_payload(payload)
+    profile = db.create_profile(profile_data)
+
+    if _as_bool(payload.get("activate")):
+        profile = db.set_active_profile(profile["id"])
+
+    active_id = db.get_active_profile_id()
+    return {
+        "ok": True,
+        "profile": _serialize_profile(profile, active_id),
+        "active_profile_id": active_id,
+    }
+
+
+@app.put("/api/profiles/{profile_id}", response_class=JSONResponse)
+async def api_profiles_update(profile_id: str, payload: dict = Body(...)):
+    existing = db.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+
+    errs = _validate_profile_payload(payload, existing)
+    if errs:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(errs))
+
+    profile_data = _prepare_profile_payload(payload, existing)
+    updated = db.update_profile(profile_id, profile_data)
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+
+    if _as_bool(payload.get("activate")):
+        updated = db.set_active_profile(profile_id)
+
+    active_id = db.get_active_profile_id()
+    return {
+        "ok": True,
+        "profile": _serialize_profile(updated, active_id),
+        "active_profile_id": active_id,
+    }
+
+
+@app.delete("/api/profiles/{profile_id}", response_class=JSONResponse)
+async def api_profiles_delete(profile_id: str):
+    active_id = db.get_active_profile_id()
+    if active_id == profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete the active profile",
+        )
+    deleted = db.delete_profile(profile_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    return {"ok": True, "deleted": profile_id}
+
+
+@app.post("/api/profiles/{profile_id}/activate", response_class=JSONResponse)
+async def api_profiles_activate(profile_id: str):
+    try:
+        profile = db.set_active_profile(profile_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+
+    active_id = db.get_active_profile_id()
+    return {
+        "ok": True,
+        "profile": _serialize_profile(profile, active_id),
+        "active_profile_id": active_id,
+    }
 
 
 @app.get("/channels")
