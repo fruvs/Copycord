@@ -16,7 +16,7 @@ import contextvars
 from datetime import datetime
 
 
-REDACT_KEYS = {"SERVER_TOKEN", "CLIENT_TOKEN"}
+REDACT_KEYS = {"SERVER_TOKEN", "CLIENT_TOKEN", "server_token", "client_token"}
 
 
 req_id_var = contextvars.ContextVar("req_id", default="-")
