@@ -130,7 +130,10 @@ copycord/
 ```yaml
 services:
   admin:
-    image: ghcr.io/copycord/copycord:v2.7.0
+    image: copycord-local:latest
+    build:
+      context: .
+      dockerfile: code/dockerfile
     container_name: copycord-admin
     environment:
       - ROLE=admin
@@ -141,7 +144,8 @@ services:
     restart: unless-stopped
 
   server:
-    image: ghcr.io/copycord/copycord:v2.7.0
+    image: copycord-local:latest
+    pull_policy: never
     container_name: copycord-server
     environment:
       - ROLE=server
@@ -152,7 +156,8 @@ services:
     restart: unless-stopped
 
   client:
-    image: ghcr.io/copycord/copycord:v2.7.0
+    image: copycord-local:latest
+    pull_policy: never
     container_name: copycord-client
     environment:
       - ROLE=client
@@ -163,15 +168,20 @@ services:
     restart: unless-stopped
 ```
 
+> [!NOTE]
+> Docker Compose will build the local image automatically the first time you run the stack. If you need to rebuild after making code changes, re-run `docker compose up --build -d` to refresh the containers. To keep using the published registry image instead, swap each `image` back to `ghcr.io/copycord/copycord:<tag>` and remove the `build` / `pull_policy` lines.
+
 ### 2. Launch Copycord
 
 Make sure you have Docker & Docker Compose installed, then open a command prompt in the same directory and run:
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
 ```
 
-This will pull the latest images and start the web ui: http://localhost:8080
+If you're using the legacy Docker Compose binary, replace `docker compose` with `docker-compose`.
+
+This will build (or rebuild) the local image and start the web UI: http://localhost:8080
 
 ### 2. Configure Copycord via the web ui
 

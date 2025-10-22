@@ -15,6 +15,260 @@
     } catch {}
   }
 
+  function markProfilePristine() {
+    if (!cfgForm) return;
+    BASELINES.cfg = snapshotForm(cfgForm);
+    BASELINES.cmd_users_csv = document.getElementById("COMMAND_USERS")?.value || "";
+    if (cfgCancelBtn) cfgCancelBtn.hidden = true;
+  }
+
+  function updateProfileStatus() {
+    if (!profileStatus) return;
+    const isSaved = Boolean(currentProfileId);
+    const active = PROFILE_STATE.activeId;
+    const current = PROFILE_STATE.list.find((p) => p.id === currentProfileId);
+    if (!isSaved) {
+      profileStatus.textContent =
+        "Unsaved profile — fill in the form and choose Save to add it.";
+    } else if (current && current.id === active) {
+      profileStatus.textContent = "Active profile";
+    } else {
+      profileStatus.textContent = "Inactive profile";
+    }
+
+    const disableActions = !isSaved;
+    if (btnDeleteProfile) btnDeleteProfile.disabled = disableActions;
+    if (btnDuplicateProfile) btnDuplicateProfile.disabled = !current && !PROFILE_STATE.defaults;
+    if (btnActivateProfile) btnActivateProfile.disabled = !isSaved || current?.id === active;
+  }
+
+  function renderProfileSelect(selectedId = "") {
+    if (!profileSelect) return;
+    profileSelect.innerHTML = "";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = PROFILE_STATE.list.length
+      ? "Select a profile"
+      : "Add a profile to begin";
+    placeholder.disabled = true;
+    placeholder.hidden = false;
+    profileSelect.appendChild(placeholder);
+
+    PROFILE_STATE.list.forEach((profile) => {
+      const opt = document.createElement("option");
+      opt.value = profile.id;
+      opt.textContent = profile.name || profile.id;
+      if (profile.is_active) opt.textContent += " (active)";
+      profileSelect.appendChild(opt);
+    });
+
+    profileSelect.disabled = PROFILE_STATE.list.length === 0;
+
+    if (selectedId) {
+      profileSelect.value = selectedId;
+    } else {
+      profileSelect.value = "";
+    }
+  }
+
+  function fillProfileForm(profile = null, { markPristine: mark = true } = {}) {
+    const data = profile || PROFILE_STATE.defaults || {
+      name: "",
+      server_token: "",
+      client_token: "",
+      host_guild_id: "",
+      clone_guild_id: "",
+      command_users: "",
+      settings: {},
+    };
+
+    if (profileIdInput) profileIdInput.value = profile?.id || "";
+    if (profileNameInput) profileNameInput.value = data.name || "";
+    const setValue = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value ?? "";
+    };
+
+    setValue("SERVER_TOKEN", data.server_token || "");
+    setValue("CLIENT_TOKEN", data.client_token || "");
+    setValue("HOST_GUILD_ID", data.host_guild_id || "");
+    setValue("CLONE_GUILD_ID", data.clone_guild_id || "");
+    setValue("COMMAND_USERS", data.command_users || "");
+
+    if (CHIPS.cmd_users) {
+      CHIPS.cmd_users.set(parseIdList(data.command_users || ""));
+    }
+
+    const settings = data.settings || {};
+    (PROFILE_STATE.boolKeys || []).forEach((key) => {
+      const el = document.getElementById(key);
+      if (!el) return;
+      const val = settings[key];
+      el.value = val ? "True" : "False";
+    });
+
+    currentProfileId = profile?.id || "";
+    updateProfileStatus();
+
+    if (profileSelect) {
+      if (currentProfileId) {
+        profileSelect.value = currentProfileId;
+      } else {
+        profileSelect.value = "";
+      }
+    }
+
+    if (mark) markProfilePristine();
+
+    validateConfigAndToggle({ decorate: false });
+  }
+
+  async function loadProfiles(selectId = "") {
+    try {
+      const res = await fetch("/api/profiles", { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await safeText(res));
+      const data = await res.json();
+      if (!data?.ok) throw new Error(data?.error || "Failed to load profiles");
+      PROFILE_STATE.list = Array.isArray(data.profiles) ? data.profiles : [];
+      PROFILE_STATE.activeId = data.active_profile_id || "";
+      PROFILE_STATE.boolKeys = Array.isArray(data.bool_keys) ? data.bool_keys : [];
+      PROFILE_STATE.defaults = data.defaults || PROFILE_STATE.defaults;
+      renderProfileSelect(selectId || currentProfileId || PROFILE_STATE.activeId);
+
+      let targetId = selectId || currentProfileId || PROFILE_STATE.activeId;
+      if (targetId) {
+        const existing = PROFILE_STATE.list.find((p) => p.id === targetId);
+        if (existing) {
+          fillProfileForm(existing);
+          return;
+        }
+      }
+
+      if (PROFILE_STATE.list.length) {
+        fillProfileForm(PROFILE_STATE.list[0]);
+      } else {
+        fillProfileForm(null);
+      }
+    } catch (err) {
+      console.error("Failed to load profiles", err);
+      showToast("Failed to load profiles", { type: "error" });
+    }
+  }
+
+  function gatherProfilePayload() {
+    const payload = {
+      id: profileIdInput?.value.trim() || undefined,
+      name: profileNameInput?.value.trim() || "",
+      server_token: document.getElementById("SERVER_TOKEN")?.value.trim() || "",
+      client_token: document.getElementById("CLIENT_TOKEN")?.value.trim() || "",
+      host_guild_id: document.getElementById("HOST_GUILD_ID")?.value.trim() || "",
+      clone_guild_id: document.getElementById("CLONE_GUILD_ID")?.value.trim() || "",
+      command_users: document.getElementById("COMMAND_USERS")?.value.trim() || "",
+      settings: {},
+    };
+
+    (PROFILE_STATE.boolKeys || []).forEach((key) => {
+      const el = document.getElementById(key);
+      if (!el) return;
+      payload.settings[key] = String(el.value).toLowerCase() === "true";
+    });
+
+    return payload;
+  }
+
+  async function handleProfileSave() {
+    const payload = gatherProfilePayload();
+    const isUpdate = Boolean(payload.id);
+    const url = isUpdate ? `/api/profiles/${payload.id}` : "/api/profiles";
+    const method = isUpdate ? "PUT" : "POST";
+
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const text = await safeText(res);
+      throw new Error(text || `Save failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    if (!data?.ok) {
+      throw new Error(data?.error || "Save failed");
+    }
+
+    const saved = data.profile;
+    currentProfileId = saved?.id || "";
+    await loadProfiles(currentProfileId);
+    showToast("Profile saved.", { type: "success" });
+  }
+
+  function startNewProfile({ duplicate = false } = {}) {
+    let base = null;
+    if (duplicate) {
+      base = PROFILE_STATE.list.find((p) => p.id === currentProfileId) || null;
+      if (base) {
+        base = JSON.parse(JSON.stringify(base));
+        base.id = "";
+        base.name = base.name ? `${base.name} copy` : "New profile";
+      }
+    }
+    if (!base) {
+      base = PROFILE_STATE.defaults
+        ? { ...PROFILE_STATE.defaults, id: "" }
+        : {
+            id: "",
+            name: "New profile",
+            server_token: "",
+            client_token: "",
+            host_guild_id: "",
+            clone_guild_id: "",
+            command_users: "",
+            settings: {},
+          };
+    }
+    fillProfileForm(base, { markPristine: true });
+    profileSelect.value = "";
+    cfgValidated = false;
+  }
+
+  async function activateCurrentProfile() {
+    if (!currentProfileId) return;
+    const res = await fetch(`/api/profiles/${currentProfileId}/activate`, {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      const text = await safeText(res);
+      throw new Error(text || "Activate failed");
+    }
+    const data = await res.json();
+    if (!data?.ok) throw new Error(data?.error || "Activate failed");
+    PROFILE_STATE.activeId = data.active_profile_id || currentProfileId;
+    await loadProfiles(currentProfileId);
+    showToast("Profile activated.", { type: "success" });
+  }
+
+  async function deleteCurrentProfile() {
+    if (!currentProfileId) return;
+    const res = await fetch(`/api/profiles/${currentProfileId}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      const text = await safeText(res);
+      throw new Error(text || "Delete failed");
+    }
+    const data = await res.json();
+    if (!data?.ok) throw new Error(data?.error || "Delete failed");
+    currentProfileId = "";
+    await loadProfiles(PROFILE_STATE.activeId);
+    showToast("Profile deleted.", { type: "success" });
+  }
+
   function saveUptime(role, sec) {
     try {
       sessionStorage.setItem(
@@ -980,6 +1234,23 @@
 
   const CHIPS = {};
   const BASELINES = { cmd_users_csv: "", cfg: "", filters: "" };
+  const PROFILE_STATE = {
+    list: [],
+    activeId: "",
+    boolKeys: [],
+    defaults: null,
+  };
+  let currentProfileId = "";
+  const profileSelect = document.getElementById("profile-select");
+  const profileStatus = document.getElementById("profile-status");
+  const profileNameInput = document.getElementById("profile-name");
+  const profileIdInput = document.getElementById("PROFILE_ID");
+  const btnNewProfile = document.getElementById("btn-new-profile");
+  const btnDuplicateProfile = document.getElementById("btn-duplicate-profile");
+  const btnDeleteProfile = document.getElementById("btn-delete-profile");
+  const btnActivateProfile = document.getElementById("btn-activate-profile");
+  let cfgForm = null;
+  let cfgCancelBtn = null;
 
   function initChips() {
     const defs = [
@@ -1185,12 +1456,14 @@
       });
     });
 
-    const cfgForm = document.getElementById("cfg-form");
+    cfgForm = document.getElementById("cfg-form");
     if (cfgForm)
       cfgForm.addEventListener("reset", () => {
         cfgValidated = false;
         setTimeout(() => validateConfigAndToggle({ decorate: false }), 0);
       });
+
+    cfgCancelBtn = document.getElementById("btn-cancel");
 
     updateToggleButton({ server: {}, client: {} });
 
@@ -1319,20 +1592,69 @@
       );
     }
 
-    const cfgCancel = document.getElementById("btn-cancel");
-    if (cfgForm && cfgCancel) {
-      BASELINES.cfg = snapshotForm(cfgForm);
-      cfgCancel.hidden = true;
+    if (profileSelect) {
+      profileSelect.addEventListener("change", () => {
+        const id = profileSelect.value;
+        if (!id) {
+          startNewProfile();
+          return;
+        }
+        const prof = PROFILE_STATE.list.find((p) => p.id === id);
+        if (prof) fillProfileForm(prof);
+      });
+    }
+
+    if (btnNewProfile)
+      btnNewProfile.addEventListener("click", () => startNewProfile());
+    if (btnDuplicateProfile)
+      btnDuplicateProfile.addEventListener("click", () =>
+        startNewProfile({ duplicate: true })
+      );
+    if (btnDeleteProfile)
+      btnDeleteProfile.addEventListener("click", () => {
+        if (!currentProfileId) return;
+        const prof = PROFILE_STATE.list.find((p) => p.id === currentProfileId);
+        const name = prof?.name || "this profile";
+        openConfirm({
+          title: "Delete profile?",
+          body: `This will permanently remove ${name}.`,
+          confirmText: "Delete",
+          confirmClass: "btn-ghost-red",
+          onConfirm: async () => {
+            try {
+              await deleteCurrentProfile();
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : "Delete failed";
+              showToast(msg, { type: "error" });
+            }
+          },
+        });
+      });
+    if (btnActivateProfile)
+      btnActivateProfile.addEventListener("click", async () => {
+        if (!currentProfileId) return;
+        try {
+          await activateCurrentProfile();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Activate failed";
+          showToast(msg, { type: "error" });
+        }
+      });
+
+    if (cfgForm && cfgCancelBtn) {
+      markProfilePristine();
 
       const updateCfgDirty = () => {
-        cfgCancel.hidden = snapshotForm(cfgForm) === BASELINES.cfg;
+        cfgCancelBtn.hidden = snapshotForm(cfgForm) === BASELINES.cfg;
       };
 
       cfgForm.addEventListener("input", updateCfgDirty);
       cfgForm.addEventListener("change", updateCfgDirty);
       cfgForm.addEventListener("reset", () => setTimeout(updateCfgDirty, 0));
-      cfgCancel.addEventListener("click", () => {
-        cfgForm.reset();
+      cfgCancelBtn.addEventListener("click", () => {
+        const current = PROFILE_STATE.list.find((p) => p.id === currentProfileId);
+        if (current) fillProfileForm(current, { markPristine: true });
+        else startNewProfile();
 
         cfgValidated = false;
         validateConfigAndToggle({ decorate: "clear" });
@@ -1374,43 +1696,51 @@
             if (btn2) btn2.disabled = false;
             return;
           }
+          if (
+            PROFILE_STATE.activeId &&
+            currentProfileId &&
+            PROFILE_STATE.activeId !== currentProfileId
+          ) {
+            showToast("Activate the selected profile before starting.", {
+              type: "error",
+              timeout: 6000,
+            });
+            f.classList.remove("is-loading");
+            const btn2 = f.querySelector(
+              'button[type="submit"],button:not([type])'
+            );
+            if (btn2) btn2.disabled = false;
+            return;
+          }
         }
 
+        const isSave = actionPath === "/save";
         if (btn) btn.disabled = true;
         f.classList.add("is-loading");
 
         try {
-          const body = new FormData(f);
-          const res = await fetch(f.action, {
-            method: "POST",
-            body,
-            credentials: "same-origin",
-          });
-          const isSuccess = res.ok || (res.status >= 300 && res.status < 400);
+          if (isSave) {
+            await handleProfileSave();
+            fetchAndRenderStatus();
+          } else {
+            const body = new FormData(f);
+            const res = await fetch(f.action, {
+              method: "POST",
+              body,
+              credentials: "same-origin",
+            });
+            const isSuccess = res.ok || (res.status >= 300 && res.status < 400);
 
-          if (isSuccess) {
-            showToast(messages[actionPath] || "Done.", { type: "success" });
-            if (actionPath === "/start" || actionPath === "/stop") {
-              burstStatusPoll(800, 15000, 4000);
-            } else if (actionPath === "/save") {
-              const cmdHidden = document.getElementById("COMMAND_USERS");
-              if (cmdHidden) {
-                BASELINES.cmd_users_csv = cmdHidden.value;
-                cmdHidden.defaultValue = cmdHidden.value;
-              }
-              if (cfgForm) {
-                BASELINES.cfg = snapshotForm(cfgForm);
-                document
-                  .getElementById("btn-cancel")
-                  ?.setAttribute("hidden", "");
-              }
-              fetchAndRenderStatus();
-            } else if (actionPath === "/filters/save") {
-              const ff = document.getElementById("form-filters");
-              if (ff) {
-                BASELINES.filters = snapshotForm(ff);
-                document
-                  .getElementById("btn-cancel-filters")
+            if (isSuccess) {
+              showToast(messages[actionPath] || "Done.", { type: "success" });
+              if (actionPath === "/start" || actionPath === "/stop") {
+                burstStatusPoll(800, 15000, 4000);
+              } else if (actionPath === "/filters/save") {
+                const ff = document.getElementById("form-filters");
+                if (ff) {
+                  BASELINES.filters = snapshotForm(ff);
+                  document
+                    .getElementById("btn-cancel-filters")
                   ?.setAttribute("hidden", "");
               }
             }
@@ -1421,8 +1751,9 @@
               timeout: 7000,
             });
           }
-        } catch {
-          showToast("Network error", { type: "error" });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Network error";
+          showToast(msg || "Network error", { type: "error" });
         } finally {
           f.classList.remove("is-loading");
           if (btn) btn.disabled = false;
@@ -1433,6 +1764,7 @@
     enhanceAllSelects();
     initCollapsibleCards();
     initChips();
+    loadProfiles();
 
     const filtersForm = document.getElementById("form-filters");
     const filtersCancel = document.getElementById("btn-cancel-filters");
