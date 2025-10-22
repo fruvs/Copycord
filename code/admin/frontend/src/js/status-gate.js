@@ -25,16 +25,16 @@ window.createStatusGate = function createStatusGate(opts = {}) {
       if (isUp) {
         try {
           onUp && onUp(json);
-        } catch {}
+        } catch (err) {}
       } else {
         try {
           onDown && onDown(json);
-        } catch {}
+        } catch (err) {}
       }
     }
     try {
       onStatusChange && onStatusChange(isUp, json);
-    } catch {}
+    } catch (err) {}
     lastIsUp = isUp;
   }
 
@@ -124,7 +124,7 @@ window.createStatusGate = function createStatusGate(opts = {}) {
     try {
       const t = Number(sessionStorage.getItem(readyCacheKey) || 0);
       return t && Date.now() - t < readyTtlMs;
-    } catch {
+    } catch (err) {
       return false;
     }
   }
@@ -196,7 +196,7 @@ window.createStatusGate = function createStatusGate(opts = {}) {
         const r = await fetch(url, { cache: "no-store" });
         if (!r.ok) continue;
         return await r.json();
-      } catch {}
+      } catch (err) {}
     }
     return null;
   }
@@ -221,7 +221,7 @@ window.createStatusGate = function createStatusGate(opts = {}) {
       hideGateSafe();
       try {
         sessionStorage.setItem(readyCacheKey, String(Date.now()));
-      } catch {}
+      } catch (err) {}
       if (typeof onReady === "function") onReady();
       fireStatus(true, j);
       return true;

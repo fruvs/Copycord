@@ -1,6 +1,7 @@
-
+ARG TARGETPLATFORM=linux/amd64
 
 FROM node:20-slim AS webbuild
+ARG TARGETPLATFORM
 WORKDIR /frontend
 
 COPY code/admin/frontend/package*.json ./
@@ -9,8 +10,8 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked,id=npm-${TARGETPLATFORM}
 COPY code/admin/frontend/ .
 RUN --mount=type=cache,target=/root/.npm,sharing=locked,id=npm-${TARGETPLATFORM} npm run build
 
-
 FROM python:3.11-slim
+ARG TARGETPLATFORM
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

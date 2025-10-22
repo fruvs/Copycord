@@ -12,7 +12,261 @@
     try {
       if (on) el.setAttribute("inert", "");
       else el.removeAttribute("inert");
-    } catch {}
+    } catch (err) {}
+  }
+
+  function markProfilePristine() {
+    if (!cfgForm) return;
+    BASELINES.cfg = snapshotForm(cfgForm);
+    BASELINES.cmd_users_csv = document.getElementById("COMMAND_USERS")?.value || "";
+    if (cfgCancelBtn) cfgCancelBtn.hidden = true;
+  }
+
+  function updateProfileStatus() {
+    if (!profileStatus) return;
+    const isSaved = Boolean(currentProfileId);
+    const active = PROFILE_STATE.activeId;
+    const current = PROFILE_STATE.list.find((p) => p.id === currentProfileId);
+    if (!isSaved) {
+      profileStatus.textContent =
+        "Unsaved profile — fill in the form and choose Save to add it.";
+    } else if (current && current.id === active) {
+      profileStatus.textContent = "Active profile";
+    } else {
+      profileStatus.textContent = "Inactive profile";
+    }
+
+    const disableActions = !isSaved;
+    if (btnDeleteProfile) btnDeleteProfile.disabled = disableActions;
+    if (btnDuplicateProfile) btnDuplicateProfile.disabled = !current && !PROFILE_STATE.defaults;
+    if (btnActivateProfile) btnActivateProfile.disabled = !isSaved || current?.id === active;
+  }
+
+  function renderProfileSelect(selectedId = "") {
+    if (!profileSelect) return;
+    profileSelect.innerHTML = "";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = PROFILE_STATE.list.length
+      ? "Select a profile"
+      : "Add a profile to begin";
+    placeholder.disabled = true;
+    placeholder.hidden = false;
+    profileSelect.appendChild(placeholder);
+
+    PROFILE_STATE.list.forEach((profile) => {
+      const opt = document.createElement("option");
+      opt.value = profile.id;
+      opt.textContent = profile.name || profile.id;
+      if (profile.is_active) opt.textContent += " (active)";
+      profileSelect.appendChild(opt);
+    });
+
+    profileSelect.disabled = PROFILE_STATE.list.length === 0;
+
+    if (selectedId) {
+      profileSelect.value = selectedId;
+    } else {
+      profileSelect.value = "";
+    }
+  }
+
+  function fillProfileForm(profile = null, { markPristine: mark = true } = {}) {
+    const data = profile || PROFILE_STATE.defaults || {
+      name: "",
+      server_token: "",
+      client_token: "",
+      host_guild_id: "",
+      clone_guild_id: "",
+      command_users: "",
+      settings: {},
+    };
+
+    if (profileIdInput) profileIdInput.value = profile?.id || "";
+    if (profileNameInput) profileNameInput.value = data.name || "";
+    const setValue = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value ?? "";
+    };
+
+    setValue("SERVER_TOKEN", data.server_token || "");
+    setValue("CLIENT_TOKEN", data.client_token || "");
+    setValue("HOST_GUILD_ID", data.host_guild_id || "");
+    setValue("CLONE_GUILD_ID", data.clone_guild_id || "");
+    setValue("COMMAND_USERS", data.command_users || "");
+
+    if (CHIPS.cmd_users) {
+      CHIPS.cmd_users.set(parseIdList(data.command_users || ""));
+    }
+
+    const settings = data.settings || {};
+    (PROFILE_STATE.boolKeys || []).forEach((key) => {
+      const el = document.getElementById(key);
+      if (!el) return;
+      const val = settings[key];
+      el.value = val ? "True" : "False";
+    });
+
+    currentProfileId = profile?.id || "";
+    updateProfileStatus();
+
+    if (profileSelect) {
+      if (currentProfileId) {
+        profileSelect.value = currentProfileId;
+      } else {
+        profileSelect.value = "";
+      }
+    }
+
+    if (mark) markProfilePristine();
+
+    validateConfigAndToggle({ decorate: false });
+  }
+
+  async function loadProfiles(selectId = "") {
+    try {
+      const res = await fetch("/api/profiles", { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await safeText(res));
+      const data = await res.json();
+      if (!data?.ok) throw new Error(data?.error || "Failed to load profiles");
+      PROFILE_STATE.list = Array.isArray(data.profiles) ? data.profiles : [];
+      PROFILE_STATE.activeId = data.active_profile_id || "";
+      PROFILE_STATE.boolKeys = Array.isArray(data.bool_keys) ? data.bool_keys : [];
+      PROFILE_STATE.defaults = data.defaults || PROFILE_STATE.defaults;
+      renderProfileSelect(selectId || currentProfileId || PROFILE_STATE.activeId);
+
+      let targetId = selectId || currentProfileId || PROFILE_STATE.activeId;
+      if (targetId) {
+        const existing = PROFILE_STATE.list.find((p) => p.id === targetId);
+        if (existing) {
+          fillProfileForm(existing);
+          return;
+        }
+      }
+
+      if (PROFILE_STATE.list.length) {
+        fillProfileForm(PROFILE_STATE.list[0]);
+      } else {
+        fillProfileForm(null);
+      }
+    } catch (err) {
+      console.error("Failed to load profiles", err);
+      showToast("Failed to load profiles", { type: "error" });
+    }
+  }
+
+  function gatherProfilePayload() {
+    const payload = {
+      id: profileIdInput?.value.trim() || undefined,
+      name: profileNameInput?.value.trim() || "",
+      server_token: document.getElementById("SERVER_TOKEN")?.value.trim() || "",
+      client_token: document.getElementById("CLIENT_TOKEN")?.value.trim() || "",
+      host_guild_id: document.getElementById("HOST_GUILD_ID")?.value.trim() || "",
+      clone_guild_id: document.getElementById("CLONE_GUILD_ID")?.value.trim() || "",
+      command_users: document.getElementById("COMMAND_USERS")?.value.trim() || "",
+      settings: {},
+    };
+
+    (PROFILE_STATE.boolKeys || []).forEach((key) => {
+      const el = document.getElementById(key);
+      if (!el) return;
+      payload.settings[key] = String(el.value).toLowerCase() === "true";
+    });
+
+    return payload;
+  }
+
+  async function handleProfileSave() {
+    const payload = gatherProfilePayload();
+    const isUpdate = Boolean(payload.id);
+    const url = isUpdate ? `/api/profiles/${payload.id}` : "/api/profiles";
+    const method = isUpdate ? "PUT" : "POST";
+
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const text = await safeText(res);
+      throw new Error(text || `Save failed (${res.status})`);
+    }
+
+    const data = await res.json();
+    if (!data?.ok) {
+      throw new Error(data?.error || "Save failed");
+    }
+
+    const saved = data.profile;
+    currentProfileId = saved?.id || "";
+    await loadProfiles(currentProfileId);
+    showToast("Profile saved.", { type: "success" });
+  }
+
+  function startNewProfile({ duplicate = false } = {}) {
+    let base = null;
+    if (duplicate) {
+      base = PROFILE_STATE.list.find((p) => p.id === currentProfileId) || null;
+      if (base) {
+        base = JSON.parse(JSON.stringify(base));
+        base.id = "";
+        base.name = base.name ? `${base.name} copy` : "New profile";
+      }
+    }
+    if (!base) {
+      base = PROFILE_STATE.defaults
+        ? { ...PROFILE_STATE.defaults, id: "" }
+        : {
+            id: "",
+            name: "New profile",
+            server_token: "",
+            client_token: "",
+            host_guild_id: "",
+            clone_guild_id: "",
+            command_users: "",
+            settings: {},
+          };
+    }
+    fillProfileForm(base, { markPristine: true });
+    profileSelect.value = "";
+    cfgValidated = false;
+  }
+
+  async function activateCurrentProfile() {
+    if (!currentProfileId) return;
+    const res = await fetch(`/api/profiles/${currentProfileId}/activate`, {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      const text = await safeText(res);
+      throw new Error(text || "Activate failed");
+    }
+    const data = await res.json();
+    if (!data?.ok) throw new Error(data?.error || "Activate failed");
+    PROFILE_STATE.activeId = data.active_profile_id || currentProfileId;
+    await loadProfiles(currentProfileId);
+    showToast("Profile activated.", { type: "success" });
+  }
+
+  async function deleteCurrentProfile() {
+    if (!currentProfileId) return;
+    const res = await fetch(`/api/profiles/${currentProfileId}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      const text = await safeText(res);
+      throw new Error(text || "Delete failed");
+    }
+    const data = await res.json();
+    if (!data?.ok) throw new Error(data?.error || "Delete failed");
+    currentProfileId = "";
+    await loadProfiles(PROFILE_STATE.activeId);
+    showToast("Profile deleted.", { type: "success" });
   }
 
   function markProfilePristine() {
@@ -282,7 +536,7 @@
         UPTIME_KEY(role),
         JSON.stringify({ sec: Number(sec || 0), t: Date.now() })
       );
-    } catch {}
+    } catch (err) {}
   }
   function loadUptime(role, maxAgeMs = 60_000) {
     try {
@@ -293,7 +547,7 @@
         return null;
       if (Date.now() - obj.t > maxAgeMs) return null;
       return obj;
-    } catch {
+    } catch (err) {
       return null;
     }
   }
@@ -396,7 +650,7 @@
             key,
             JSON.stringify({ v: value, exp: Date.now() + ttlMs })
           );
-        } catch {}
+        } catch (err) {}
       }
       function ssGet(key) {
         try {
@@ -409,7 +663,7 @@
             return null;
           }
           return obj.v;
-        } catch {
+        } catch (err) {
           return null;
         }
       }
@@ -638,7 +892,7 @@
       const cliOk =
         data.client && data.client.ok !== false && !data.client.error;
       if (!srvOk || !cliOk) startStatusPoll(8000);
-    } catch {
+    } catch (err) {
       startStatusPoll(Math.min(currentInterval * 2, 15000));
     }
   }
@@ -727,7 +981,7 @@
     if (es) {
       try {
         es.close();
-      } catch {}
+      } catch (err) {}
       es = null;
     }
     lastFocusLog = document.activeElement;
@@ -784,7 +1038,7 @@
       if (es) {
         try {
           es.close();
-        } catch {}
+        } catch (err) {}
       }
       es = new EventSource(`/logs/stream/${which}`);
 
@@ -793,7 +1047,7 @@
           const obj = JSON.parse(ev.data);
           if (Array.isArray(obj.lines)) appendLines(obj.lines);
           else if (typeof obj.line === "string") appendLine(obj.line);
-        } catch {
+        } catch (err) {
           appendLine(ev.data);
         }
       };
@@ -805,7 +1059,7 @@
         });
         try {
           es.close();
-        } catch {}
+        } catch (err) {}
         retryTimer = setTimeout(() => {
           if (modal.classList.contains("show")) startStream();
         }, 1500);
@@ -819,7 +1073,7 @@
     if (es) {
       try {
         es.close();
-      } catch {}
+      } catch (err) {}
       es = null;
     }
     logBody.removeEventListener("scroll", onScroll);
@@ -827,7 +1081,7 @@
     if (active && modal.contains(active)) {
       try {
         active.blur();
-      } catch {}
+      } catch (err) {}
     }
     setInert(modal, true);
     modal.classList.remove("show");
@@ -835,7 +1089,7 @@
     if (lastFocusLog && typeof lastFocusLog.focus === "function") {
       try {
         lastFocusLog.focus();
-      } catch {}
+      } catch (err) {}
     }
     lastFocusLog = null;
   }
@@ -1175,7 +1429,7 @@
           const n = BigInt(s);
           if (n <= 0n) continue;
           ids.push(n.toString());
-        } catch {}
+        } catch (err) {}
       }
       this.addMany(ids);
     }
@@ -1369,7 +1623,7 @@
   async function safeText(res) {
     try {
       return await res.text();
-    } catch {
+    } catch (err) {
       return "";
     }
   }
@@ -1532,7 +1786,7 @@
       if (active && cModal.contains(active)) {
         try {
           active.blur();
-        } catch {}
+        } catch (err) {}
       }
       setInert(cModal, true);
       cModal.classList.remove("show");
@@ -1540,7 +1794,7 @@
       if (lastFocusConfirm && typeof lastFocusConfirm.focus === "function") {
         try {
           lastFocusConfirm.focus();
-        } catch {}
+        } catch (err) {}
       }
       lastFocusConfirm = null;
       confirmResolve = null;
@@ -1852,7 +2106,7 @@
             showToast(msg.data?.msg || "Info", { type: "success" });
           if (msg.type === "error")
             showToast(msg.data?.msg || "Error", { type: "error" });
-        } catch {}
+        } catch (err) {}
       };
 
       ws.onclose = () => {
@@ -1884,7 +2138,7 @@
         let msg;
         try {
           msg = JSON.parse(ev.data);
-        } catch {
+        } catch (err) {
           return;
         }
         const { type, source, data } = msg;
@@ -1924,7 +2178,7 @@
                 status: typeof p.status === "string" ? p.status : "",
               });
             }
-          } catch {}
+          } catch (err) {}
         };
       } catch (e) {
         console.warn("Failed to attach admin bus", e);
