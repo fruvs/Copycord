@@ -45,14 +45,14 @@
     if (!el) return;
     try {
       on ? el.setAttribute("inert", "") : el.removeAttribute("inert");
-    } catch {}
+    } catch (err) {}
   }
   function blurIfInside(container) {
     const active = document.activeElement;
     if (active && container && container.contains(active)) {
       try {
         active.blur();
-      } catch {}
+      } catch (err) {}
     }
   }
   let lastFocusConfirm = null;
@@ -97,7 +97,7 @@
     onDown() {
       try {
         resetAllCloningUI();
-      } catch {}
+      } catch (err) {}
       inflightReady = false;
       document
         .querySelectorAll(".ch-card .ch-status, .ch-card .ch-progress")
@@ -115,7 +115,7 @@
         fetchAndApplyInflight().finally(() => {
           inflightReady = true;
         });
-      } catch {}
+      } catch (err) {}
     },
   });
   if (!gate.lastUpIsFresh()) gate.showGateSoon();
@@ -235,17 +235,17 @@
     try {
       localStorage.setItem("bf:running", "[]");
       localStorage.setItem("bf:launching", "[]");
-    } catch {}
+    } catch (err) {}
 
     try {
       localStorage.setItem("bf:pulling", "[]");
-    } catch {}
+    } catch (err) {}
     pullingClones.clear();
     for (const id of [...cleaningClones]) setCardLoading(id, false);
     cleaningClones.clear();
     try {
       localStorage.setItem("bf:cleaning", "[]");
-    } catch {}
+    } catch (err) {}
 
     try {
       const rm = [];
@@ -260,7 +260,7 @@
         }
       }
       rm.forEach((k) => sessionStorage.removeItem(k));
-    } catch {}
+    } catch (err) {}
   }
 
   function upsertStatusPill(card, text = "Cloning") {
@@ -377,7 +377,7 @@
       const prev = JSON.parse(sessionStorage.getItem(k) || "null");
       if (prev && now < prev.expiresAt) return;
       sessionStorage.setItem(k, JSON.stringify({ expiresAt: now + ttlMs }));
-    } catch {}
+    } catch (err) {}
     window.showToast(message, opts);
   }
 
@@ -411,7 +411,7 @@
       ]);
       arr.sort((a, b) => a[0].localeCompare(b[0]));
       return JSON.stringify(arr);
-    } catch {
+    } catch (err) {
       return null;
     }
   }
@@ -422,7 +422,7 @@
         return Object.entries(
           JSON.parse(sessionStorage.getItem("bf:taskmap") || "{}")
         );
-      } catch {
+      } catch (err) {
         return [];
       }
     })()
@@ -433,7 +433,7 @@
         "bf:taskmap",
         JSON.stringify(Object.fromEntries(taskMap))
       );
-    } catch {}
+    } catch (err) {}
   }
   function rememberTask(taskId, channelId) {
     const orig = toOriginalCid(channelId);
@@ -520,8 +520,8 @@
         close();
         try {
           await load();
-        } catch {}
-      } catch {
+        } catch (err) {}
+      } catch (err) {
         window.showToast("Network error saving customization.", {
           type: "error",
         });
@@ -613,8 +613,8 @@
         close();
         try {
           await load();
-        } catch {}
-      } catch {
+        } catch (err) {}
+      } catch (err) {
         window.showToast("Network error saving customization.", {
           type: "error",
         });
@@ -823,7 +823,7 @@
     (() => {
       try {
         return JSON.parse(localStorage.getItem("bf:running") || "[]");
-      } catch {
+      } catch (err) {
         return [];
       }
     })()
@@ -832,7 +832,7 @@
     (() => {
       try {
         return JSON.parse(localStorage.getItem("bf:launching") || "[]");
-      } catch {
+      } catch (err) {
         return [];
       }
     })()
@@ -842,7 +842,7 @@
     (() => {
       try {
         return JSON.parse(localStorage.getItem("bf:cleaning") || "[]");
-      } catch {
+      } catch (err) {
         return [];
       }
     })()
@@ -852,7 +852,7 @@
     (() => {
       try {
         return JSON.parse(localStorage.getItem("bf:pulling") || "[]");
-      } catch {
+      } catch (err) {
         return [];
       }
     })()
@@ -865,7 +865,7 @@
 
     try {
       localStorage.setItem("bf:pulling", JSON.stringify([...pullingClones]));
-    } catch {}
+    } catch (err) {}
 
     const card = document.querySelector(`.ch-card[data-cid="${k}"]`);
     if (on) {
@@ -880,7 +880,7 @@
     else cleaningClones.delete(k);
     try {
       localStorage.setItem("bf:cleaning", JSON.stringify([...cleaningClones]));
-    } catch {}
+    } catch (err) {}
   }
 
   const inflightByOrig = new Map();
@@ -913,7 +913,7 @@
       }"] .ch-display-name`;
       const el = document.querySelector(sel);
       if (el) return el.textContent.replace(/^#\s*/, "").trim();
-    } catch {}
+    } catch (err) {}
     return null;
   }
 
@@ -1031,7 +1031,7 @@
         "bf:running",
         JSON.stringify([...new Set(inflightByOrig.keys())])
       );
-    } catch {}
+    } catch (err) {}
   }
 
   /** Fetch current in-flight backfills and apply to UI */
@@ -1045,7 +1045,7 @@
       if (res.ok && json?.ok !== false) {
         applyInflightUI(json.items || {});
       }
-    } catch {}
+    } catch (err) {}
   }
 
   let inflightTimer = null;
@@ -1081,7 +1081,7 @@
         "bf:launching",
         JSON.stringify([...launchingClones])
       );
-    } catch {}
+    } catch (err) {}
   }
   function cloneIsLocked(id) {
     const k = String(id);
@@ -1101,7 +1101,7 @@
     else runningClones.delete(k);
     try {
       localStorage.setItem("bf:running", JSON.stringify([...runningClones]));
-    } catch {}
+    } catch (err) {}
     const card = document.querySelector(`.ch-card[data-cid="${k}"]`);
     if (card) {
       card.classList.toggle("is-cloning", on);
@@ -1138,7 +1138,7 @@
         try {
           input.showPicker();
           return;
-        } catch {}
+        } catch (err) {}
       }
       input.focus();
     });
@@ -1152,17 +1152,17 @@
     try {
       localStorage.setItem("bf:running", "[]");
       localStorage.setItem("bf:launching", "[]");
-    } catch {}
+    } catch (err) {}
     try {
       const key = `toast:persist:bf:stopped`;
       sessionStorage.setItem(
         key,
         JSON.stringify({ expiresAt: Date.now() + 10_000 })
       );
-    } catch {}
+    } catch (err) {}
     try {
       localStorage.setItem("bf:pulling", "[]");
-    } catch {}
+    } catch (err) {}
     pullingClones.clear();
   }
 
@@ -1250,7 +1250,7 @@
       .replace(/^#\s*/, "");
     try {
       return v.normalize("NFKD").replace(/\p{Diacritic}/gu, "");
-    } catch {
+    } catch (err) {
       return v;
     }
   };
@@ -1650,7 +1650,7 @@
         );
         isOrphanChannel =
           card?.dataset?.orphan === "1" || !!card?.dataset?.orphan;
-      } catch {}
+      } catch (err) {}
     }
 
     const cloneItem = menu.querySelector('[data-action="clone"]');
@@ -1816,7 +1816,7 @@
                 type: "success",
               });
               await load();
-            } catch {
+            } catch (err) {
               window.showToast("Failed to add to blacklist.", {
                 type: "error",
               });
@@ -1843,7 +1843,7 @@
           window.showToast("Copied original channel ID to clipboard.", {
             type: "success",
           });
-        } catch {
+        } catch (err) {
           window.showToast("Could not copy channel ID.", { type: "error" });
         }
         hideMenu({ restoreFocus: false });
@@ -1873,7 +1873,7 @@
           window.showToast("Copied clone channel ID to clipboard.", {
             type: "success",
           });
-        } catch {
+        } catch (err) {
           window.showToast("Could not copy channel ID.", { type: "error" });
         }
         hideMenu({ restoreFocus: false });
@@ -1930,7 +1930,7 @@
               window.showToast("Category added to blacklist.", {
                 type: "success",
               });
-            } catch {
+            } catch (err) {
               window.showToast("Failed to add to blacklist.", {
                 type: "error",
               });
@@ -2059,7 +2059,7 @@
         try {
           await navigator.clipboard.writeText(String(originalCatId));
           window.showToast("Copied original category ID.", { type: "success" });
-        } catch {
+        } catch (err) {
           window.showToast("Could not copy ID.", { type: "error" });
         }
         hideMenu({ restoreFocus: false });
@@ -2087,7 +2087,7 @@
         try {
           await navigator.clipboard.writeText(String(clonedCatId));
           window.showToast("Copied clone category ID.", { type: "success" });
-        } catch {
+        } catch (err) {
           window.showToast("Could not copy ID.", { type: "error" });
         }
         hideMenu({ restoreFocus: false });
@@ -2565,7 +2565,7 @@
     if (lastFocusVerify && typeof lastFocusVerify.focus === "function") {
       try {
         lastFocusVerify.focus();
-      } catch {}
+      } catch (err) {}
     }
   }
 
@@ -2669,7 +2669,7 @@
       if (lastFocusConfirm && typeof lastFocusConfirm.focus === "function") {
         try {
           lastFocusConfirm.focus();
-        } catch {}
+        } catch (err) {}
       }
       teardown();
     };
@@ -2996,7 +2996,7 @@
                   `bf:cancelled:${cid}`,
                   String(Date.now())
                 );
-              } catch {}
+              } catch (err) {}
             } else {
               console.warn(
                 "[backfill_cancelled] Could not resolve channel id; leaving locks as-is.",
@@ -3320,13 +3320,13 @@
       el.setAttribute("aria-invalid", "true");
       try {
         el.setCustomValidity(msg || "Invalid input");
-      } catch {}
+      } catch (err) {}
       setFieldError(el, msg || "Invalid input");
     } else {
       el.removeAttribute("aria-invalid");
       try {
         el.setCustomValidity("");
-      } catch {}
+      } catch (err) {}
       setFieldError(el, "");
     }
   }
@@ -3371,7 +3371,7 @@
       inp.removeAttribute("aria-describedby");
       try {
         inp.setCustomValidity("");
-      } catch {}
+      } catch (err) {}
     });
   }
 

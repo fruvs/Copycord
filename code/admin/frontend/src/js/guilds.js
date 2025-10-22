@@ -189,7 +189,7 @@
       let raw;
       try {
         raw = JSON.parse(ev.data);
-      } catch {
+      } catch (err) {
         return;
       }
       const p = raw?.payload ?? raw;
@@ -902,7 +902,7 @@
           (m) => m.slice(0, 8) + "…"
         );
         return `${u.origin}${tail}`;
-      } catch {
+      } catch (err) {
         return val.slice(0, 8) + "…";
       }
     }
@@ -1328,11 +1328,11 @@
     try {
       const j = await res.json();
       if (j?.error) return j.error;
-    } catch {}
+    } catch (err) {}
     try {
       const t = await res.text();
       return t || res.statusText || String(res.status);
-    } catch {
+    } catch (err) {
       return res.statusText || String(res.status);
     }
   }
@@ -1390,10 +1390,10 @@
   document.addEventListener("DOMContentLoaded", () => {
     try {
       window.initSlideMenu?.();
-    } catch {}
+    } catch (err) {}
     try {
       window.enhanceAllSelects?.();
-    } catch {}
+    } catch (err) {}
     bindMenuDelegationOnce();
 
     const gate = createStatusGate({
@@ -1430,6 +1430,6 @@
         setScrapeState(false);
         render();
       }
-    } catch {}
+    } catch (err) {}
   }
 })();

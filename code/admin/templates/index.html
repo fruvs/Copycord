@@ -155,8 +155,39 @@
       "ENABLE_CLONING": "Master switch to enable or disable cloning.",
       } %}
 
+      <section class="profile-controls" aria-label="Profile manager">
+        <div class="field">
+          <label for="profile-select">Select profile</label>
+          <p class="profile-help">Add, duplicate, or switch between Copycord setups.</p>
+          <div class="profile-row">
+            <select id="profile-select" class="profile-select"></select>
+            <button type="button" class="btn btn-primary" id="btn-new-profile">
+              Add profile
+            </button>
+            <button type="button" class="btn btn-ghost" id="btn-duplicate-profile">Duplicate</button>
+            <button type="button" class="btn btn-ghost" id="btn-delete-profile">Delete</button>
+            <button type="button" class="btn btn-ghost" id="btn-activate-profile">Set active</button>
+          </div>
+          <p class="profile-status" id="profile-status"></p>
+        </div>
+      </section>
+
       <form method="post" action="/save" id="cfg-form" novalidate>
         <div class="grid">
+          <input type="hidden" id="PROFILE_ID" name="PROFILE_ID" value="">
+
+          <div class="field">
+            <label for="profile-name" class="has-tip">
+              <span class="label-text">PROFILE_NAME</span>
+              <button type="button" class="info-dot" aria-label="What is PROFILE_NAME?" id="tip-profile-name-btn"
+                aria-describedby="tip-profile-name"></button>
+              <span id="tip-profile-name" role="tooltip" class="tip-bubble">
+                Name used to identify this configuration.
+              </span>
+            </label>
+            <input type="text" id="profile-name" name="PROFILE_NAME" autocomplete="off" spellcheck="false" />
+          </div>
+
           {% for k in text_keys if k != 'COMMAND_USERS' %}
           {% set is_token = 'TOKEN' in k %}
           {% set is_id = k.endswith('_ID') %}
@@ -286,7 +317,7 @@
           </div>
 
           <div class="btns">
-            <button class="btn btn-ghost" type="submit">Save</button>
+            <button class="btn btn-ghost" type="submit">Save profile</button>
             <button type="button" class="btn btn-ghost" id="btn-cancel" hidden>Cancel</button>
           </div>
         </div>

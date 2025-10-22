@@ -1,6 +1,9 @@
 services:
   admin:
-    image: ghcr.io/copycord/copycord:v2.7.0
+    image: copycord-local:latest
+    build:
+      context: .
+      dockerfile: code/dockerfile
     container_name: copycord-admin
     environment:
       - ROLE=admin
@@ -10,7 +13,8 @@ services:
       - ./data:/data
 
   server:
-    image: ghcr.io/copycord/copycord:v2.7.0
+    image: copycord-local:latest
+    pull_policy: never
     container_name: copycord-server
     environment:
       - ROLE=server
@@ -20,7 +24,8 @@ services:
       - admin
 
   client:
-    image: ghcr.io/copycord/copycord:v2.7.0
+    image: copycord-local:latest
+    pull_policy: never
     container_name: copycord-client
     environment:
       - ROLE=client

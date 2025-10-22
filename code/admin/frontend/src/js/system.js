@@ -33,7 +33,7 @@
           resolve();
           return;
         }
-      } catch {}
+      } catch (err) {}
 
       let remaining = new Set(props);
       let done = false;
@@ -100,7 +100,7 @@
     if (!iso) return "—";
     try {
       return new Date(iso).toLocaleString();
-    } catch {
+    } catch (err) {
       return iso;
     }
   };
@@ -138,7 +138,7 @@
       else if (input instanceof Date) d = input;
       else return "—";
       if (isNaN(d.getTime())) return "—";
-    } catch {
+    } catch (err) {
       return "—";
     }
 
@@ -627,7 +627,7 @@
 
     try {
       localStorage.removeItem("cpc.panel.database.open");
-    } catch {}
+    } catch (err) {}
     setOpen(false);
 
     btn.addEventListener("click", (e) => {
